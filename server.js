@@ -14,6 +14,7 @@
 //      (values are oldest-first, ready to chart)
 
 import http from "node:http";
+import { readFile } from "node:fs/promises";
 
 const PORT = process.env.PORT || 8787;
 const PROVIDER = (process.env.PROVIDER || "twelvedata").toLowerCase(); // "twelvedata" | "polygon"
@@ -84,6 +85,19 @@ const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://${req.headers.host}`);
 
   if (req.method === "OPTIONS") return send(res, 204, {}); // CORS preflight
+
+  // Serve the frontend at the root, same-origin as the API (no CORS/file:// headaches).
+  if (u.pathname === "/" || u.pathname === "/index.html") {
+    try {
+      const html = await readFile(new URL("./quant-terminal.html", import.meta.url));
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(html);
+    } catch {
+      send(res, 500, { error: "quant-terminal.html not found next to server.js" });
+    }
+    return;
+  }
+
   if (u.pathname === "/health") return send(res, 200, { ok: true, provider: PROVIDER });
   if (u.pathname !== "/api/timeseries") return send(res, 404, { error: "Not found." });
 

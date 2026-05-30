@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Quant Terminal</title>
+<style>
+  html, body { margin: 0; background: #06090a; }
+  body {
+    min-height: 100vh; display: flex; align-items: flex-start; justify-content: center;
+    padding: 28px 16px; box-sizing: border-box;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+  }
+  #root { width: 100%; max-width: 880px; }
+  #boot { color: #7c8a82; font-family: ui-monospace, monospace; font-size: 13px; text-align: center; padding: 80px 0; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.24.7/babel.min.js"></script>
+</head>
+<body>
+<div id="root"><div id="boot">Loading Quant Terminal…</div></div>
+<script>
+  function showErr(msg) {
+    var r = document.getElementById("root");
+    if (r) r.innerHTML =
+      '<pre style="color:#ff5d52;font:13px ui-monospace,monospace;white-space:pre-wrap;padding:24px;line-height:1.5">'
+      + 'Load error:\n' + msg + '\n\nHard-refresh with Ctrl+F5.' + '</pre>';
+  }
+  window.addEventListener("error", function (e) {
+    showErr((e && e.message ? e.message : e) + (e && e.filename ? "\n(" + e.filename + ")" : ""));
+  });
+  window.addEventListener("load", function () {
+    var missing = [];
+    if (typeof React === "undefined") missing.push("React");
+    if (typeof ReactDOM === "undefined") missing.push("ReactDOM");
+    if (typeof Recharts === "undefined") missing.push("Recharts");
+    if (typeof Babel === "undefined") missing.push("Babel");
+    if (missing.length) showErr("These libraries failed to download: " + missing.join(", ") + ".");
+  });
+</script>
+<script type="text/babel" data-presets="react">
+const { useState, useMemo, useCallback, useEffect } = React;
+const RC = (typeof Recharts !== "undefined" && Recharts) ? Recharts : {};
+const {
+  ComposedChart, Line, Bar, Area, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, Cell, ReferenceLine,
+} = RC;
+
+/* Minimal inline icon shims (replacing lucide-react for a no-build file) */
+const ib = ({ size = 20, color = "currentColor", strokeWidth = 2, style, className, fill = "none" } = {}) =>
+  ({ width: size, height: size, viewBox: "0 0 24 24", fill, stroke: color, strokeWidth, strokeLinecap: "round", strokeLinejoin: "round", style, className });
+const Search = (p) => (<svg {...ib(p)}><circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" /></svg>);
+const TrendingUp = (p) => (<svg {...ib(p)}><polyline points="22 7 13.5 15.5 8.5 10.5 2 17" /><polyline points="16 7 22 7 22 13" /></svg>);
+const TrendingDown = (p) => (<svg {...ib(p)}><polyline points="22 17 13.5 8.5 8.5 13.5 2 7" /><polyline points="16 17 22 17 22 11" /></svg>);
+const Activity = (p) => (<svg {...ib(p)}><polyline points="22 12 18 12 15 21 9 3 6 12 2 12" /></svg>);
+const AlertCircle = (p) => (<svg {...ib(p)}><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>);
+const Loader2 = (p) => (<svg {...ib(p)}><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>);
+const Server = (p) => (<svg {...ib(p)}><rect x="2" y="2" width="20" height="8" rx="2" /><rect x="2" y="14" width="20" height="8" rx="2" /><line x1="6" y1="6" x2="6.01" y2="6" /><line x1="6" y1="18" x2="6.01" y2="18" /></svg>);
+const Minus = (p) => (<svg {...ib(p)}><line x1="5" y1="12" x2="19" y2="12" /></svg>);
+const Zap = (p) => (<svg {...ib(p)}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg>);
+
+
+/* ------------------------------------------------------------------ */
+/*  Indicator math — all computed client-side from one OHLCV pull      */
+/* ------------------------------------------------------------------ */
+
+const sma = (vals, p) =>
+  vals.map((_, i) =>
+    i < p - 1 ? null : vals.slice(i - p + 1, i + 1).reduce((a, b) => a + b, 0) / p
+  );
+
+const ema = (vals, p) => {
+  const k = 2 / (p + 1);
+  const out = new Array(vals.length).fill(null);
+  let prev = null;
+  for (let i = 0; i < vals.length; i++) {
+    if (i < p - 1) continue;
+    if (i === p - 1) {
+      prev = vals.slice(0, p).reduce((a, b) => a + b, 0) / p;
+    } else {
+      prev = vals[i] * k + prev * (1 - k);
+    }
+    out[i] = prev;
+  }
+  return out;
+};
+
+const rsi = (vals, p = 14) => {
+  const out = new Array(vals.length).fill(null);
+  let gain = 0, loss = 0;
+  for (let i = 1; i < vals.length; i++) {
+    const ch = vals[i] - vals[i - 1];
+    const g = Math.max(ch, 0), l = Math.max(-ch, 0);
+    if (i <= p) {
+      gain += g; loss += l;
+      if (i === p) {
+        gain /= p; loss /= p;
+        out[i] = 100 - 100 / (1 + (loss === 0 ? 100 : gain / loss));
+      }
+    } else {
+      gain = (gain * (p - 1) + g) / p;
+      loss = (loss * (p - 1) + l) / p;
+      out[i] = 100 - 100 / (1 + (loss === 0 ? 100 : gain / loss));
+    }
+  }
+  return out;
+};
+
+const macd = (vals) => {
+  const e12 = ema(vals, 12), e26 = ema(vals, 26);
+  const line = vals.map((_, i) =>
+    e12[i] != null && e26[i] != null ? e12[i] - e26[i] : null
+  );
+  const valid = line.filter((v) => v != null);
+  const sig9 = ema(valid, 9);
+  const signal = new Array(vals.length).fill(null);
+  let j = 0;
+  for (let i = 0; i < line.length; i++) if (line[i] != null) signal[i] = sig9[j++];
+  const hist = line.map((v, i) => (v != null && signal[i] != null ? v - signal[i] : null));
+  return { line, signal, hist };
+};
+
+const bollinger = (vals, p = 20, mult = 2) => {
+  const mid = sma(vals, p);
+  const upper = new Array(vals.length).fill(null);
+  const lower = new Array(vals.length).fill(null);
+  for (let i = p - 1; i < vals.length; i++) {
+    const slice = vals.slice(i - p + 1, i + 1);
+    const m = mid[i];
+    const sd = Math.sqrt(slice.reduce((a, b) => a + (b - m) ** 2, 0) / p);
+    upper[i] = m + mult * sd;
+    lower[i] = m - mult * sd;
+  }
+  return { mid, upper, lower };
+};
+
+const annualizedVol = (closes) => {
+  const rets = [];
+  for (let i = 1; i < closes.length; i++) rets.push(Math.log(closes[i] / closes[i - 1]));
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const variance = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (rets.length - 1);
+  return Math.sqrt(variance) * Math.sqrt(252) * 100;
+};
+
+/* ------------------------------------------------------------------ */
+/*  Signal engine                                                      */
+/* ------------------------------------------------------------------ */
+
+const buildSignals = (d) => {
+  const out = [];
+  const last = d.length - 1;
+  const px = d[last].close;
+
+  // Trend vs moving averages
+  if (d[last].sma50 != null && d[last].sma200 != null) {
+    const golden = d[last].sma50 > d[last].sma200;
+    out.push({
+      name: "MA Trend (50/200)",
+      verdict: golden ? "bull" : "bear",
+      detail: golden
+        ? "SMA-50 above SMA-200 — golden-cross regime"
+        : "SMA-50 below SMA-200 — death-cross regime",
+    });
+  }
+  if (d[last].sma50 != null) {
+    const above = px > d[last].sma50;
+    out.push({
+      name: "Price vs SMA-50",
+      verdict: above ? "bull" : "bear",
+      detail: `Last close ${above ? "above" : "below"} the 50-period mean`,
+    });
+  }
+
+  // RSI
+  if (d[last].rsi != null) {
+    const r = d[last].rsi;
+    let v = "neutral", t = "Momentum balanced (30–70)";
+    if (r >= 70) { v = "bear"; t = `Overbought (RSI ${r.toFixed(1)})`; }
+    else if (r <= 30) { v = "bull"; t = `Oversold (RSI ${r.toFixed(1)})`; }
+    out.push({ name: "RSI-14", verdict: v, detail: t });
+  }
+
+  // MACD
+  if (d[last].macd != null && d[last].macdSignal != null) {
+    const above = d[last].macd > d[last].macdSignal;
+    // recent cross?
+    let crossed = false;
+    if (last > 0 && d[last - 1].macd != null && d[last - 1].macdSignal != null) {
+      const prevAbove = d[last - 1].macd > d[last - 1].macdSignal;
+      crossed = prevAbove !== above;
+    }
+    out.push({
+      name: "MACD (12/26/9)",
+      verdict: above ? "bull" : "bear",
+      detail: `${above ? "Bullish" : "Bearish"}${crossed ? " — fresh crossover" : " histogram"}`,
+    });
+  }
+
+  // Bollinger
+  if (d[last].bbUpper != null) {
+    let v = "neutral", t = "Inside the bands";
+    if (px > d[last].bbUpper) { v = "bear"; t = "Closed above upper band — stretched"; }
+    else if (px < d[last].bbLower) { v = "bull"; t = "Closed below lower band — washed out"; }
+    out.push({ name: "Bollinger (20,2)", verdict: v, detail: t });
+  }
+
+  return out;
+};
+
+/* ------------------------------------------------------------------ */
+/*  Presentation helpers                                               */
+/* ------------------------------------------------------------------ */
+
+const C = {
+  bg: "#0a0d0c",
+  panel: "#111614",
+  panelAlt: "#0d1110",
+  line: "#1d2522",
+  text: "#e8efe9",
+  dim: "#7c8a82",
+  faint: "#566059",
+  acc: "#c2f24a",     // phosphor lime
+  up: "#3ddc84",
+  down: "#ff5d52",
+  blue: "#5bc8ff",
+  amber: "#ffc24b",
+};
+
+const fmt = (n, dp = 2) =>
+  n == null || isNaN(n) ? "—" : n.toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp });
+
+const INTERVALS = [
+  { id: "1day", label: "1D" },
+  { id: "1week", label: "1W" },
+  { id: "1hour", label: "1H" },
+  { id: "30min", label: "30M" },
+];
+const ivLabel = (id) => (INTERVALS.find((i) => i.id === id) || {}).label || id;
+
+/* ------------------------------------------------------------------ */
+/*  Main component                                                     */
+/* ------------------------------------------------------------------ */
+
+function QuantTerminal() {
+  const [proxyUrl, setProxyUrl] = useState("https://claude-76eb.onrender.com");
+  const [symbol, setSymbol] = useState("AAPL");
+  const [interval, setIntervalId] = useState("1day");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [raw, setRaw] = useState(null);
+  const [meta, setMeta] = useState(null);
+  const [health, setHealth] = useState({ state: "unknown", provider: "" });
+
+  const checkHealth = useCallback(async () => {
+    const base = proxyUrl.trim().replace(/\/+$/, "");
+    if (!base) { setHealth({ state: "unknown", provider: "" }); return; }
+    setHealth((h) => ({ ...h, state: "checking" }));
+    try {
+      const res = await fetch(`${base}/health`);
+      const json = await res.json();
+      if (json && json.ok) setHealth({ state: "ok", provider: json.provider || "" });
+      else setHealth({ state: "down", provider: "" });
+    } catch {
+      setHealth({ state: "down", provider: "" });
+    }
+  }, [proxyUrl]);
+
+  // ping on load and (debounced) whenever the proxy URL changes
+  useEffect(() => {
+    const t = setTimeout(checkHealth, 400);
+    return () => clearTimeout(t);
+  }, [checkHealth]);
+
+  const run = useCallback(async () => {
+    const sym = symbol.trim().toUpperCase();
+    const base = proxyUrl.trim().replace(/\/+$/, "");
+    if (!base) { setErr("Enter your proxy URL first (e.g. https://claude-76eb.onrender.com)."); return; }
+    if (!sym) { setErr("Enter a ticker symbol."); return; }
+    setLoading(true); setErr("");
+
+    const url = `${base}/api/timeseries?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(interval)}`;
+
+    let res;
+    try {
+      res = await fetch(url);
+    } catch (netErr) {
+      setErr("Couldn't reach the proxy. Is it running, and is the URL right? (Check the /health endpoint, and ALLOWED_ORIGIN on the server.)");
+      setHealth({ state: "down", provider: "" });
+      setRaw(null); setLoading(false);
+      return;
+    }
+    try {
+      const json = await res.json();
+      // The proxy returns { error } on failure (rate limit, bad symbol, key not set, ...).
+      if (json.error) throw new Error(json.error);
+      if (!json.values || !json.values.length) throw new Error("No data returned for that symbol/interval.");
+
+      // Already normalized + oldest-first by the proxy.
+      const values = json.values
+        .map((v) => ({
+          datetime: v.datetime,
+          open: +v.open, high: +v.high, low: +v.low, close: +v.close,
+          volume: v.volume ? +v.volume : 0,
+        }))
+        .slice(-400);
+
+      setRaw(values);
+      setMeta({ symbol: json.symbol || sym, provider: json.provider || "" });
+      setHealth({ state: "ok", provider: json.provider || "" });
+    } catch (e) {
+      setErr(e.message || "Request failed.");
+      setRaw(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [proxyUrl, symbol, interval]);
+
+  /* derive indicators + chart rows */
+  const model = useMemo(() => {
+    if (!raw) return null;
+    const closes = raw.map((r) => r.close);
+    const s20 = sma(closes, 20), s50 = sma(closes, 50), s200 = sma(closes, 200);
+    const e12 = ema(closes, 12), e26 = ema(closes, 26);
+    const r14 = rsi(closes, 14);
+    const m = macd(closes);
+    const bb = bollinger(closes, 20, 2);
+
+    const rows = raw.map((r, i) => ({
+      ...r,
+      idx: i,
+      up: r.close >= r.open,
+      wick: [r.low, r.high],
+      body: [r.open, r.close],
+      sma20: s20[i], sma50: s50[i], sma200: s200[i],
+      ema12: e12[i], ema26: e26[i],
+      rsi: r14[i],
+      macd: m.line[i], macdSignal: m.signal[i], macdHist: m.hist[i],
+      bbUpper: bb.upper[i], bbLower: bb.lower[i], bbMid: bb.mid[i],
+      bbBand: bb.upper[i] != null ? [bb.lower[i], bb.upper[i]] : null,
+    }));
+
+    const signals = buildSignals(rows);
+    const bull = signals.filter((s) => s.verdict === "bull").length;
+    const bear = signals.filter((s) => s.verdict === "bear").length;
+    const score = bull - bear;
+    const bias = score > 1 ? "BULLISH" : score < -1 ? "BEARISH" : "NEUTRAL";
+
+    const last = rows[rows.length - 1];
+    const prev = rows[rows.length - 2] || last;
+    const chg = last.close - prev.close;
+    const chgPct = (chg / prev.close) * 100;
+    const hi = Math.max(...raw.map((r) => r.high));
+    const lo = Math.min(...raw.map((r) => r.low));
+    const vol = annualizedVol(closes);
+
+    // show recent window for legibility
+    const view = rows.slice(-120);
+    return { rows, view, signals, bias, score, last, chg, chgPct, hi, lo, vol };
+  }, [raw]);
+
+  const tickFmt = (dt) => (dt || "").slice(5, 10);
+
+  return (
+    <div style={{ background: C.bg, color: C.text, fontFamily: "'JetBrains Mono', monospace", minHeight: 640, borderRadius: 16, overflow: "hidden", border: `1px solid ${C.line}` }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+        .qt-disp { font-family: 'Bricolage Grotesque', sans-serif; }
+        .qt-in::placeholder { color: ${C.faint}; }
+        .qt-in:focus { outline: none; border-color: ${C.acc}; box-shadow: 0 0 0 1px ${C.acc}; }
+        .qt-btn:hover { background: ${C.acc}; color: #0a0d0c; }
+        .qt-pill:hover { border-color: ${C.acc}; color: ${C.acc}; }
+        .qt-fade { animation: qtfade .5s ease both; }
+        @keyframes qtfade { from { opacity:0; transform: translateY(6px);} to {opacity:1; transform:none;} }
+        .qt-scroll::-webkit-scrollbar { height:8px; width:8px;}
+        .qt-scroll::-webkit-scrollbar-thumb { background:${C.line}; border-radius:8px;}
+      `}</style>
+
+      {/* ---- Header ---- */}
+      <div style={{ padding: "20px 24px", borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", justifyContent: "space-between", background: `linear-gradient(180deg, ${C.panelAlt}, ${C.bg})` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 36, height: 36, borderRadius: 9, background: C.acc, display: "grid", placeItems: "center", boxShadow: `0 0 22px ${C.acc}55` }}>
+            <Zap size={20} color="#0a0d0c" strokeWidth={2.5} />
+          </div>
+          <div>
+            <div className="qt-disp" style={{ fontSize: 19, fontWeight: 800, letterSpacing: -0.4 }}>
+              QUANT<span style={{ color: C.acc }}>·</span>TERMINAL
+            </div>
+            <div style={{ fontSize: 10.5, color: C.dim, letterSpacing: 1.5, textTransform: "uppercase" }}>
+              Live technical analysis
+            </div>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <StatusPill health={health} onClick={checkHealth} />
+          {model && (
+            <div style={{ textAlign: "right" }} className="qt-fade">
+              <div className="qt-disp" style={{ fontSize: 22, fontWeight: 700 }}>{meta?.symbol || symbol}</div>
+              <div style={{ fontSize: 11, color: C.dim }}>{meta?.provider || "via proxy"} · {ivLabel(interval)}</div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ---- Controls ---- */}
+      <div style={{ padding: "16px 24px", borderBottom: `1px solid ${C.line}`, background: C.panelAlt }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{ position: "relative", flex: "1 1 220px" }}>
+            <Server size={14} color={C.faint} style={{ position: "absolute", left: 12, top: 13 }} />
+            <input
+              className="qt-in" type="text" value={proxyUrl}
+              onChange={(e) => setProxyUrl(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && run()}
+              placeholder="Proxy URL (https://claude-76eb.onrender.com)"
+              style={inputStyle(40)}
+            />
+          </div>
+          <div style={{ position: "relative", flex: "0 1 160px" }}>
+            <Search size={14} color={C.faint} style={{ position: "absolute", left: 12, top: 13 }} />
+            <input
+              className="qt-in" value={symbol}
+              onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+              onKeyDown={(e) => e.key === "Enter" && run()}
+              placeholder="TICKER"
+              style={{ ...inputStyle(40), letterSpacing: 1 }}
+            />
+          </div>
+          <div style={{ display: "flex", gap: 4, background: C.bg, padding: 4, borderRadius: 10, border: `1px solid ${C.line}` }}>
+            {INTERVALS.map((iv) => (
+              <button key={iv.id} className="qt-pill" onClick={() => setIntervalId(iv.id)}
+                style={{
+                  border: "1px solid transparent", background: interval === iv.id ? C.acc : "transparent",
+                  color: interval === iv.id ? "#0a0d0c" : C.dim, padding: "7px 12px", borderRadius: 7,
+                  fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", transition: "all .15s",
+                }}>
+                {iv.label}
+              </button>
+            ))}
+          </div>
+          <button className="qt-btn" onClick={run} disabled={loading}
+            style={{
+              display: "flex", alignItems: "center", gap: 8, background: C.text, color: "#0a0d0c",
+              border: "none", padding: "0 20px", height: 40, borderRadius: 10, fontWeight: 700, fontSize: 13,
+              cursor: loading ? "wait" : "pointer", fontFamily: "inherit", transition: "all .15s",
+            }}>
+            {loading ? <Loader2 size={16} className="qt-spin" style={{ animation: "spin 1s linear infinite" }} /> : <Activity size={16} />}
+            Analyze
+          </button>
+        </div>
+        <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+        {err && (
+          <div style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center", color: C.down, fontSize: 12.5, background: `${C.down}15`, border: `1px solid ${C.down}40`, padding: "9px 12px", borderRadius: 8 }}>
+            <AlertCircle size={15} /> {err}
+          </div>
+        )}
+      </div>
+
+      {/* ---- Empty state ---- */}
+      {!model && !loading && (
+        <div style={{ padding: "70px 24px", textAlign: "center", color: C.dim }}>
+          <div className="qt-disp" style={{ fontSize: 28, color: C.faint, fontWeight: 700, marginBottom: 10 }}>
+            Awaiting symbol
+          </div>
+          <div style={{ fontSize: 13, maxWidth: 420, margin: "0 auto", lineHeight: 1.6 }}>
+            Point this at your running proxy, enter a ticker, and hit Analyze.
+            Your API key stays on the server; indicators are computed locally.
+          </div>
+        </div>
+      )}
+
+      {/* ---- Results ---- */}
+      {model && (
+        <div className="qt-fade" style={{ padding: 24 }}>
+          {/* stat strip */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 10, marginBottom: 22 }}>
+            <Stat label="Last" value={fmt(model.last.close)} />
+            <Stat label="Change" value={`${model.chg >= 0 ? "+" : ""}${fmt(model.chg)}`}
+              sub={`${model.chgPct >= 0 ? "+" : ""}${fmt(model.chgPct)}%`}
+              color={model.chg >= 0 ? C.up : C.down} />
+            <Stat label="Range Hi" value={fmt(model.hi)} />
+            <Stat label="Range Lo" value={fmt(model.lo)} />
+            <Stat label="RSI-14" value={fmt(model.last.rsi, 1)}
+              color={model.last.rsi >= 70 ? C.down : model.last.rsi <= 30 ? C.up : C.text} />
+            <Stat label="Ann. Vol" value={`${fmt(model.vol, 1)}%`} color={C.amber} />
+          </div>
+
+          {/* bias badge */}
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 18, flexWrap: "wrap" }}>
+            <BiasBadge bias={model.bias} />
+            <div style={{ fontSize: 12, color: C.dim }}>
+              Composite of {model.signals.length} signals · score {model.score >= 0 ? "+" : ""}{model.score}
+            </div>
+          </div>
+
+          {/* price chart */}
+          <Panel title="PRICE · CANDLES + SMA(20/50/200) + BOLLINGER(20,2)">
+            <ResponsiveContainer width="100%" height={300}>
+              <ComposedChart data={model.view} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke={C.line} vertical={false} />
+                <XAxis dataKey="datetime" tickFormatter={tickFmt} tick={{ fill: C.dim, fontSize: 10 }} stroke={C.line} minTickGap={32} />
+                <YAxis domain={["auto", "auto"]} tick={{ fill: C.dim, fontSize: 10 }} stroke={C.line} width={52} orientation="right" />
+                <Tooltip content={<PriceTip />} />
+                <Area dataKey="bbBand" stroke="none" fill={C.blue} fillOpacity={0.06} isAnimationActive={false} connectNulls />
+                <Line dataKey="bbUpper" stroke={C.blue} strokeWidth={1} dot={false} strokeDasharray="3 3" isAnimationActive={false} connectNulls />
+                <Line dataKey="bbLower" stroke={C.blue} strokeWidth={1} dot={false} strokeDasharray="3 3" isAnimationActive={false} connectNulls />
+                <Bar dataKey="wick" barSize={1.5} isAnimationActive={false}>
+                  {model.view.map((d, i) => <Cell key={i} fill={d.up ? C.up : C.down} />)}
+                </Bar>
+                <Bar dataKey="body" barSize={5} isAnimationActive={false}>
+                  {model.view.map((d, i) => <Cell key={i} fill={d.up ? C.up : C.down} />)}
+                </Bar>
+                <Line dataKey="sma20" stroke={C.acc} strokeWidth={1.4} dot={false} isAnimationActive={false} connectNulls />
+                <Line dataKey="sma50" stroke={C.amber} strokeWidth={1.4} dot={false} isAnimationActive={false} connectNulls />
+                <Line dataKey="sma200" stroke="#b07cff" strokeWidth={1.4} dot={false} isAnimationActive={false} connectNulls />
+              </ComposedChart>
+            </ResponsiveContainer>
+            <Legend2 items={[["SMA-20", C.acc], ["SMA-50", C.amber], ["SMA-200", "#b07cff"], ["Bands", C.blue]]} />
+          </Panel>
+
+          {/* volume */}
+          <Panel title="VOLUME">
+            <ResponsiveContainer width="100%" height={110}>
+              <ComposedChart data={model.view} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+                <XAxis dataKey="datetime" tickFormatter={tickFmt} tick={{ fill: C.dim, fontSize: 10 }} stroke={C.line} minTickGap={32} />
+                <YAxis tick={{ fill: C.dim, fontSize: 10 }} stroke={C.line} width={52} orientation="right" tickFormatter={(v) => v >= 1e6 ? (v / 1e6).toFixed(0) + "M" : v >= 1e3 ? (v / 1e3).toFixed(0) + "K" : v} />
+                <Tooltip content={<VolTip />} />
+                <Bar dataKey="volume" isAnimationActive={false}>
+                  {model.view.map((d, i) => <Cell key={i} fill={d.up ? `${C.up}99` : `${C.down}99`} />)}
+                </Bar>
+              </ComposedChart>
+            </ResponsiveContainer>
+          </Panel>
+
+          {/* RSI */}
+          <Panel title="RSI · 14">
+            <ResponsiveContainer width="100%" height={130}>
+              <ComposedChart data={model.view} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke={C.line} vertical={false} />
+                <XAxis dataKey="datetime" tickFormatter={tickFmt} tick={{ fill: C.dim, fontSize: 10 }} stroke={C.line} minTickGap={32} />
+                <YAxis domain={[0, 100]} ticks={[30, 50, 70]} tick={{ fill: C.dim, fontSize: 10 }} stroke={C.line} width={52} orientation="right" />
+                <Tooltip content={<GenTip keys={[["rsi", "RSI", C.acc, 1]]} fmtX={tickFmt} />} />
+                <ReferenceLine y={70} stroke={C.down} strokeDasharray="4 4" />
+                <ReferenceLine y={30} stroke={C.up} strokeDasharray="4 4" />
+                <Line dataKey="rsi" stroke={C.acc} strokeWidth={1.6} dot={false} isAnimationActive={false} connectNulls />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </Panel>
+
+          {/* MACD */}
+          <Panel title="MACD · 12 / 26 / 9">
+            <ResponsiveContainer width="100%" height={130}>
+              <ComposedChart data={model.view} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke={C.line} vertical={false} />
+                <XAxis dataKey="datetime" tickFormatter={tickFmt} tick={{ fill: C.dim, fontSize: 10 }} stroke={C.line} minTickGap={32} />
+                <YAxis tick={{ fill: C.dim, fontSize: 10 }} stroke={C.line} width={52} orientation="right" />
+                <Tooltip content={<GenTip keys={[["macd", "MACD", C.acc, 3], ["macdSignal", "Signal", C.amber, 3], ["macdHist", "Hist", C.dim, 3]]} fmtX={tickFmt} />} />
+                <ReferenceLine y={0} stroke={C.faint} />
+                <Bar dataKey="macdHist" isAnimationActive={false}>
+                  {model.view.map((d, i) => <Cell key={i} fill={(d.macdHist || 0) >= 0 ? `${C.up}aa` : `${C.down}aa`} />)}
+                </Bar>
+                <Line dataKey="macd" stroke={C.acc} strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls />
+                <Line dataKey="macdSignal" stroke={C.amber} strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </Panel>
+
+          {/* signals */}
+          <div style={{ marginTop: 22 }}>
+            <SectionLabel>SIGNAL BREAKDOWN</SectionLabel>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))", gap: 10, marginTop: 12 }}>
+              {model.signals.map((s, i) => <SignalCard key={i} s={s} />)}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 22, fontSize: 11, color: C.faint, lineHeight: 1.6, borderTop: `1px solid ${C.line}`, paddingTop: 14 }}>
+            Indicators are descriptive, computed from delayed/EOD data depending on your plan. This is an
+            analysis tool, not investment advice — signals are mechanical rules, not recommendations.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Small presentational pieces                                        */
+/* ------------------------------------------------------------------ */
+
+const inputStyle = (h) => ({
+  width: "100%", height: h, background: "#0a0d0c", border: `1px solid ${C.line}`,
+  borderRadius: 10, color: C.text, padding: "0 12px 0 34px", fontSize: 13,
+  fontFamily: "'JetBrains Mono', monospace", boxSizing: "border-box",
+});
+
+function StatusPill({ health, onClick }) {
+  const map = {
+    ok: { c: C.up, label: health.provider ? `proxy · ${health.provider}` : "proxy online", pulse: false },
+    down: { c: C.down, label: "proxy offline", pulse: false },
+    checking: { c: C.amber, label: "checking…", pulse: true },
+    unknown: { c: C.faint, label: "no proxy URL", pulse: false },
+  };
+  const s = map[health.state] || map.unknown;
+  return (
+    <button
+      onClick={onClick}
+      title="Click to re-check the proxy"
+      style={{
+        display: "flex", alignItems: "center", gap: 8, background: `${s.c}14`,
+        border: `1px solid ${s.c}44`, color: s.c, padding: "6px 11px", borderRadius: 999,
+        fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit", letterSpacing: 0.3,
+      }}>
+      <span style={{
+        width: 8, height: 8, borderRadius: 999, background: s.c, display: "inline-block",
+        boxShadow: `0 0 8px ${s.c}`, animation: s.pulse ? "qtpulse 1s ease-in-out infinite" : "none",
+      }} />
+      {s.label}
+      <style>{`@keyframes qtpulse{0%,100%{opacity:1}50%{opacity:.3}}`}</style>
+    </button>
+  );
+}
+
+function Stat({ label, value, sub, color }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: "12px 14px" }}>
+      <div style={{ fontSize: 10, color: C.dim, textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
+      <div className="qt-disp" style={{ fontSize: 21, fontWeight: 700, color: color || C.text, marginTop: 3 }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: color || C.dim, marginTop: 1 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function BiasBadge({ bias }) {
+  const map = {
+    BULLISH: { c: C.up, Icon: TrendingUp },
+    BEARISH: { c: C.down, Icon: TrendingDown },
+    NEUTRAL: { c: C.dim, Icon: Minus },
+  };
+  const { c, Icon } = map[bias];
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 9, background: `${c}18`, border: `1px solid ${c}55`, color: c, padding: "9px 16px", borderRadius: 12 }}>
+      <Icon size={18} />
+      <span className="qt-disp" style={{ fontSize: 16, fontWeight: 800, letterSpacing: 0.5 }}>{bias}</span>
+    </div>
+  );
+}
+
+function Panel({ title, children }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14, padding: "14px 14px 10px", marginBottom: 16 }}>
+      <SectionLabel>{title}</SectionLabel>
+      <div style={{ marginTop: 8 }}>{children}</div>
+    </div>
+  );
+}
+
+function SectionLabel({ children }) {
+  return <div style={{ fontSize: 10.5, color: C.dim, letterSpacing: 1.6, textTransform: "uppercase", fontWeight: 700 }}>{children}</div>;
+}
+
+function Legend2({ items }) {
+  return (
+    <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 4, paddingLeft: 4 }}>
+      {items.map(([label, c]) => (
+        <div key={label} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: C.dim }}>
+          <span style={{ width: 14, height: 3, background: c, borderRadius: 2, display: "inline-block" }} />
+          {label}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SignalCard({ s }) {
+  const map = { bull: C.up, bear: C.down, neutral: C.dim };
+  const c = map[s.verdict];
+  return (
+    <div style={{ background: C.panelAlt, border: `1px solid ${C.line}`, borderLeft: `3px solid ${c}`, borderRadius: 10, padding: "11px 13px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 700 }}>{s.name}</span>
+        <span style={{ fontSize: 10, fontWeight: 700, color: c, textTransform: "uppercase", letterSpacing: 1 }}>{s.verdict}</span>
+      </div>
+      <div style={{ fontSize: 11.5, color: C.dim, marginTop: 4, lineHeight: 1.4 }}>{s.detail}</div>
+    </div>
+  );
+}
+
+/* Tooltips */
+function shell(children) {
+  return (
+    <div style={{ background: "#070a09", border: `1px solid ${C.line}`, borderRadius: 9, padding: "9px 11px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace" }}>
+      {children}
+    </div>
+  );
+}
+function PriceTip({ active, payload }) {
+  if (!active || !payload || !payload.length) return null;
+  const d = payload[0].payload;
+  const row = (k, v, c) => (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 18, color: c || C.text }}>
+      <span style={{ color: C.dim }}>{k}</span><span>{v}</span>
+    </div>
+  );
+  return shell(
+    <>
+      <div style={{ color: C.dim, marginBottom: 5 }}>{d.datetime}</div>
+      {row("O", fmt(d.open))}{row("H", fmt(d.high))}{row("L", fmt(d.low))}
+      {row("C", fmt(d.close), d.up ? C.up : C.down)}
+      {d.sma50 != null && row("SMA50", fmt(d.sma50), C.amber)}
+    </>
+  );
+}
+function VolTip({ active, payload }) {
+  if (!active || !payload || !payload.length) return null;
+  const d = payload[0].payload;
+  return shell(<><div style={{ color: C.dim, marginBottom: 4 }}>{d.datetime}</div><div>Vol {d.volume.toLocaleString()}</div></>);
+}
+function GenTip({ active, payload, keys, fmtX }) {
+  if (!active || !payload || !payload.length) return null;
+  const d = payload[0].payload;
+  return shell(
+    <>
+      <div style={{ color: C.dim, marginBottom: 4 }}>{fmtX ? fmtX(d.datetime) : d.datetime}</div>
+      {keys.map(([k, lbl, c, dp]) => d[k] != null && (
+        <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 16, color: c }}>
+          <span style={{ color: C.dim }}>{lbl}</span><span>{fmt(d[k], dp)}</span>
+        </div>
+      ))}
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<QuantTerminal />);
+</script>
+</body>
+</html>
