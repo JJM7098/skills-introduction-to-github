@@ -1,0 +1,14 @@
+{
+  "name": "market-data-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Tiny zero-dependency proxy that hides your stock API key and normalizes Twelve Data / Polygon responses.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
