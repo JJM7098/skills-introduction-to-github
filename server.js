@@ -26,6 +26,7 @@ const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*"; // lock to your app's 
 const INTERVALS = {
   "1day":  { td: "1day",  poly: { mult: 1,  span: "day" },    lookbackDays: 800 },
   "1week": { td: "1week", poly: { mult: 1,  span: "week" },   lookbackDays: 2200 },
+  "4hour": { td: "4h",    poly: { mult: 4,  span: "hour" },   lookbackDays: 220 },
   "1hour": { td: "1h",    poly: { mult: 1,  span: "hour" },   lookbackDays: 60 },
   "30min": { td: "30min", poly: { mult: 30, span: "minute" }, lookbackDays: 30 },
 };
@@ -90,7 +91,7 @@ const server = http.createServer(async (req, res) => {
   if (u.pathname === "/" || u.pathname === "/index.html") {
     try {
       const html = await readFile(new URL("./quant-terminal.html", import.meta.url));
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
       res.end(html);
     } catch {
       send(res, 500, { error: "quant-terminal.html not found next to server.js" });
