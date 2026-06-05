@@ -6,48 +6,43 @@
 <title>Quant Terminal</title>
 <style>
   html, body { margin: 0; background: #06090a; }
-  body {
-    min-height: 100vh; display: flex; align-items: flex-start; justify-content: center;
-    padding: 28px 16px; box-sizing: border-box;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-  }
+  body { min-height: 100vh; display: flex; align-items: flex-start; justify-content: center; padding: 28px 16px; box-sizing: border-box; font-family: 'JetBrains Mono', ui-monospace, monospace; }
   #root { width: 100%; max-width: 880px; }
   #boot { color: #7c8a82; font-family: ui-monospace, monospace; font-size: 13px; text-align: center; padding: 80px 0; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.24.7/babel.min.js"></script>
 </head>
 <body>
 <div id="root"><div id="boot">Loading Quant Terminal…</div></div>
 <script>
-  function showErr(msg) {
-    var r = document.getElementById("root");
-    if (r) r.innerHTML =
-      '<pre style="color:#ff5d52;font:13px ui-monospace,monospace;white-space:pre-wrap;padding:24px;line-height:1.5">'
-      + 'Load error:\n' + msg + '\n\nHard-refresh with Ctrl+F5.' + '</pre>';
-  }
-  window.addEventListener("error", function (e) {
-    showErr((e && e.message ? e.message : e) + (e && e.filename ? "\n(" + e.filename + ")" : ""));
-  });
-  window.addEventListener("load", function () {
-    var missing = [];
-    if (typeof React === "undefined") missing.push("React");
-    if (typeof ReactDOM === "undefined") missing.push("ReactDOM");
-    if (typeof Recharts === "undefined") missing.push("Recharts");
-    if (typeof Babel === "undefined") missing.push("Babel");
-    if (missing.length) showErr("These libraries failed to download: " + missing.join(", ") + ".");
-  });
+  function showErr(msg){var r=document.getElementById("root");if(r)r.innerHTML='<pre style="color:#ff5d52;font:13px ui-monospace,monospace;white-space:pre-wrap;padding:24px;line-height:1.5">Load error:\n'+msg+'\n\nHard-refresh with Ctrl+F5.</pre>';}
+  window.addEventListener("error",function(e){showErr((e&&e.message?e.message:e)+(e&&e.filename?"\n("+e.filename+")":""));});
+  window.addEventListener("load",function(){var m=[];if(typeof React==="undefined")m.push("React");if(typeof ReactDOM==="undefined")m.push("ReactDOM");if(typeof Babel==="undefined")m.push("Babel");if(m.length)showErr("Failed to download: "+m.join(", ")+".");});
 </script>
 <script type="text/babel" data-presets="react">
-const { useState, useMemo, useCallback, useEffect } = React;
+const { useState, useMemo, useCallback, useEffect, useRef } = React;
+
+/* Recharts may or may not populate; never let a missing piece crash the app. */
 const RC = (typeof Recharts !== "undefined" && Recharts) ? Recharts : {};
-const {
-  ComposedChart, Line, Bar, Area, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, Cell, ReferenceLine,
-} = RC;
+const _noChart = () => React.createElement("div",
+  { style: { color: "#ff5d52", fontSize: 12, textAlign: "center", padding: "22px 0" } },
+  "⚠ Chart library (Recharts) didn't load — stats & signals still work.");
+const _nullC = () => null;
+const ResponsiveContainer = RC.ResponsiveContainer || _noChart;
+const ComposedChart = RC.ComposedChart || _nullC;
+const Line = RC.Line || _nullC;
+const Bar = RC.Bar || _nullC;
+const Area = RC.Area || _nullC;
+const XAxis = RC.XAxis || _nullC;
+const YAxis = RC.YAxis || _nullC;
+const CartesianGrid = RC.CartesianGrid || _nullC;
+const Tooltip = RC.Tooltip || _nullC;
+const Cell = RC.Cell || _nullC;
+const ReferenceLine = RC.ReferenceLine || _nullC;
 
 /* Minimal inline icon shims (replacing lucide-react for a no-build file) */
 const ib = ({ size = 20, color = "currentColor", strokeWidth = 2, style, className, fill = "none" } = {}) =>
@@ -61,6 +56,7 @@ const Loader2 = (p) => (<svg {...ib(p)}><path d="M21 12a9 9 0 1 1-6.219-8.56" />
 const Server = (p) => (<svg {...ib(p)}><rect x="2" y="2" width="20" height="8" rx="2" /><rect x="2" y="14" width="20" height="8" rx="2" /><line x1="6" y1="6" x2="6.01" y2="6" /><line x1="6" y1="18" x2="6.01" y2="18" /></svg>);
 const Minus = (p) => (<svg {...ib(p)}><line x1="5" y1="12" x2="19" y2="12" /></svg>);
 const Zap = (p) => (<svg {...ib(p)}><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg>);
+const Filter = (p) => (<svg {...ib(p)}><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" /></svg>);
 
 
 /* ------------------------------------------------------------------ */
@@ -211,6 +207,119 @@ const buildSignals = (d) => {
 };
 
 /* ------------------------------------------------------------------ */
+/*  Screener: per-ticker setup score                                   */
+/*  Thesis = oversold RSI + negative MACD, sitting on a Fibonacci      */
+/*  retracement / key EMA — a mechanical "pullback into support" scan. */
+/* ------------------------------------------------------------------ */
+
+/* Estimated buy/sell volume split (heuristic from close-in-range — NOT real
+   order flow, which needs tick/quote data unavailable on OHLCV bars). */
+const estBuySell = (values, win = 10) => {
+  const w = values.slice(-win);
+  let bv = 0, sv = 0;
+  for (const v of w) {
+    const rng = (v.high - v.low) || 1;
+    const frac = Math.min(1, Math.max(0, (v.close - v.low) / rng));
+    bv += v.volume * frac; sv += v.volume * (1 - frac);
+  }
+  const tot = bv + sv;
+  return { buyVol: bv, sellVol: sv, buyPct: tot ? (bv / tot) * 100 : 50 };
+};
+
+const screenTicker = (values) => {
+  const closes = values.map((v) => v.close);
+  const n = closes.length;
+  if (n < 60) return null;
+
+  const r14 = rsi(closes, 14);
+  const m = macd(closes);
+  const e20 = ema(closes, 20), e50 = ema(closes, 50);
+
+  const price = closes[n - 1];
+  const rsiV = r14[n - 1], rsiPrev = r14[n - 2];
+  const macdLine = m.line[n - 1], macdSig = m.signal[n - 1], macdHist = m.hist[n - 1];
+  const histPrev = m.hist[n - 2];
+  const macdRising = macdHist != null && histPrev != null && macdHist > histPrev;
+  const ema20 = e20[n - 1], ema50 = e50[n - 1];
+
+  // Fibonacci retracement over the recent swing
+  const LB = Math.min(120, n);
+  const slice = values.slice(-LB);
+  const swingHi = Math.max(...slice.map((v) => v.high));
+  const swingLo = Math.min(...slice.map((v) => v.low));
+  const range = (swingHi - swingLo) || 1;
+  const fibPos = (swingHi - price) / range; // 0 = at swing high, 1 = at swing low
+  const fibZone =
+    fibPos < 0.236 ? "near highs" :
+    fibPos < 0.45 ? "shallow 0.236–0.382" :
+    fibPos <= 0.70 ? "golden pocket 0.5–0.618" :
+    fibPos <= 0.90 ? "deep 0.618–0.786" : "near lows";
+
+  // nearest Fibonacci level + signed distance (entry/risk reference)
+  const ratios = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+  let nearest = null;
+  for (const rr of ratios) {
+    const lp = swingHi - range * rr;
+    if (nearest == null || Math.abs(lp - price) < Math.abs(nearest.price - price)) nearest = { r: rr, price: lp };
+  }
+  const fibNearLabel = nearest.r === 0 ? "0%" : nearest.r === 1 ? "100%" : (+(nearest.r * 100).toFixed(1)).toString() + "%";
+  const fibDistPct = ((price - nearest.price) / price) * 100; // + above level, - below
+
+  // Volume: relative participation + estimated buy/sell tilt
+  const vols = values.map((v) => v.volume);
+  const recentVol = vols.slice(-5).reduce((a, b) => a + b, 0) / Math.min(5, vols.length);
+  const baseVol = vols.slice(-50).reduce((a, b) => a + b, 0) / Math.min(50, vols.length);
+  const relVol = baseVol ? recentVol / baseVol : 1;
+  const { buyPct } = estBuySell(values, 10);
+  const volConfirm = relVol > 1.2;          // elevated participation
+  const accumulation = buyPct > 55;         // buyers stepping in despite the dip
+
+  const oversold = rsiV != null && rsiV < 40;
+  const deepOversold = rsiV != null && rsiV < 30;
+  const macdNeg = macdHist != null && macdHist < 0;
+  const atFib = fibPos >= 0.45 && fibPos <= 0.70;
+  const emaNear = ema50 != null && Math.abs(price - ema50) / ema50 < 0.04;
+  const rsiTurningUp = rsiV != null && rsiPrev != null && rsiV > rsiPrev;
+
+  let score = 0;
+  if (oversold) score += 2;
+  if (deepOversold) score += 1;
+  if (macdNeg) score += 1;
+  if (atFib) score += 2;
+  if (emaNear) score += 1;
+  if (rsiTurningUp) score += 1;
+  if (volConfirm) score += 1;
+  if (accumulation) score += 1;
+  const label = score >= 7 ? "STRONG" : score >= 5 ? "WATCH" : "—";
+
+  return {
+    price, rsi: rsiV, macdHist, macdRising, ema50,
+    fibPos, fibZone, fibNearLabel, fibDistPct, swingHi, swingLo,
+    relVol, buyPct, volConfirm, accumulation,
+    oversold, deepOversold, macdNeg, atFib, emaNear, rsiTurningUp,
+    score, label,
+  };
+};
+
+/* Multi-timeframe combine: daily sets the setup (HTF context), 4-hour times
+   the turn (LTF confirmation). Confirmation counts 4h RSI turning up, 4h MACD
+   histogram rising, and a 4h buy-volume tilt. */
+const combineTF = (daily, h4) => {
+  const dScore = daily.score;
+  let conf = 0;
+  const has4 = !!h4;
+  if (has4) {
+    conf = (h4.rsiTurningUp ? 1 : 0) + (h4.macdRising ? 1 : 0) + (h4.buyPct > 52 ? 1 : 0);
+  }
+  let verdict;
+  if (dScore >= 5 && has4 && conf >= 2) verdict = "ALIGNED";
+  else if ((dScore >= 5 && has4 && conf >= 1) || (dScore >= 3 && has4 && conf >= 2)) verdict = "WATCH";
+  else if (dScore >= 5) verdict = has4 ? "WAIT" : "WATCH"; // HTF ready; LTF not confirming
+  else verdict = "—";
+  return { dScore, h4Confirm: has4 ? conf : null, verdict, combinedScore: dScore + conf };
+};
+
+/* ------------------------------------------------------------------ */
 /*  Presentation helpers                                               */
 /* ------------------------------------------------------------------ */
 
@@ -235,10 +344,15 @@ const fmt = (n, dp = 2) =>
 const INTERVALS = [
   { id: "1day", label: "1D" },
   { id: "1week", label: "1W" },
+  { id: "4hour", label: "4H" },
   { id: "1hour", label: "1H" },
   { id: "30min", label: "30M" },
 ];
 const ivLabel = (id) => (INTERVALS.find((i) => i.id === id) || {}).label || id;
+
+// Editable starting universe — current US mega-caps (mid-2026). Not a live
+// market-cap ranking (that's not feasible on a free API tier); edit freely.
+const DEFAULT_UNIVERSE = "NVDA, GOOGL, AAPL, MSFT, AMZN, META, AVGO, TSLA, WMT, LLY";
 
 /* ------------------------------------------------------------------ */
 /*  Main component                                                     */
@@ -253,6 +367,20 @@ function QuantTerminal() {
   const [raw, setRaw] = useState(null);
   const [meta, setMeta] = useState(null);
   const [health, setHealth] = useState({ state: "unknown", provider: "" });
+
+  // ---- screener state ----
+  const [mode, setMode] = useState("single"); // "single" | "screen"
+  const [universe, setUniverse] = useState(DEFAULT_UNIVERSE);
+  const [screening, setScreening] = useState(false);
+  const [progress, setProgress] = useState({ phase: "", done: 0, total: 0, current: "" });
+  const [results, setResults] = useState(null);
+  const [screenErr, setScreenErr] = useState("");
+  const cancelRef = useRef(false);
+
+  // ---- Developer-tier features ----
+  const [flow, setFlow] = useState(null);          // real order flow on Analyze view
+  const [uniSort, setUniSort] = useState("losers"); // market-scan criterion
+  const [pulling, setPulling] = useState(false);
 
   const checkHealth = useCallback(async () => {
     const base = proxyUrl.trim().replace(/\/+$/, "");
@@ -274,12 +402,12 @@ function QuantTerminal() {
     return () => clearTimeout(t);
   }, [checkHealth]);
 
-  const run = useCallback(async () => {
-    const sym = symbol.trim().toUpperCase();
+  const run = useCallback(async (symOverride) => {
+    const sym = ((typeof symOverride === "string" && symOverride) ? symOverride : symbol).trim().toUpperCase();
     const base = proxyUrl.trim().replace(/\/+$/, "");
     if (!base) { setErr("Enter your proxy URL first (e.g. https://claude-76eb.onrender.com)."); return; }
     if (!sym) { setErr("Enter a ticker symbol."); return; }
-    setLoading(true); setErr("");
+    setLoading(true); setErr(""); setFlow(null);
 
     const url = `${base}/api/timeseries?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(interval)}`;
 
@@ -318,6 +446,111 @@ function QuantTerminal() {
     }
   }, [proxyUrl, symbol, interval]);
 
+  // throttled scan across the universe (one ticker at a time)
+  // Two-pass scan: daily on everything, then 4-hour confirmation on daily setups.
+  const runScreen = useCallback(async () => {
+    const base = proxyUrl.trim().replace(/\/+$/, "");
+    if (!base) { setScreenErr("Enter your proxy URL first."); return; }
+    const syms = [...new Set(universe.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))];
+    if (!syms.length) { setScreenErr("Add at least one ticker to the watchlist."); return; }
+
+    setScreening(true); setScreenErr(""); setResults(null);
+    cancelRef.current = false;
+    const DELAY = 150; // Developer tier: high rate limit, so just a gentle gap
+
+    const pull = async (sym, iv) => {
+      try {
+        const res = await fetch(`${base}/api/timeseries?symbol=${encodeURIComponent(sym)}&interval=${iv}`);
+        const json = await res.json();
+        if (json.error) return { error: json.error };
+        if (!json.values || !json.values.length) return { error: "no data" };
+        setHealth({ state: "ok", provider: json.provider || "" });
+        return { values: json.values.map((v) => ({ datetime: v.datetime, open: +v.open, high: +v.high, low: +v.low, close: +v.close, volume: v.volume ? +v.volume : 0 })) };
+      } catch { setHealth({ state: "down", provider: "" }); return { error: "fetch failed" }; }
+    };
+
+    // Pass 1 — daily on the whole watchlist
+    const rows = [];
+    for (let i = 0; i < syms.length; i++) {
+      if (cancelRef.current) break;
+      const sym = syms[i];
+      setProgress({ phase: "Daily scan", done: i, total: syms.length, current: sym });
+      const d = await pull(sym, "1day");
+      if (d.error) rows.push({ symbol: sym, error: d.error });
+      else {
+        const dm = screenTicker(d.values);
+        rows.push(dm ? { symbol: sym, daily: dm } : { symbol: sym, error: "not enough history" });
+      }
+      if (i < syms.length - 1 && !cancelRef.current) await new Promise((r) => setTimeout(r, DELAY));
+    }
+
+    // Pass 2 — 4-hour confirmation only on names that already show a daily setup
+    const qualifiers = rows.filter((r) => !r.error && r.daily.score >= 4);
+    for (let j = 0; j < qualifiers.length; j++) {
+      if (cancelRef.current) break;
+      const q = qualifiers[j];
+      setProgress({ phase: "4H confirm", done: j, total: qualifiers.length, current: q.symbol });
+      await new Promise((r) => setTimeout(r, DELAY)); // space from the previous call
+      if (cancelRef.current) break;
+      const h = await pull(q.symbol, "4hour");
+      if (!h.error) { const hm = screenTicker(h.values); if (hm) q.h4 = hm; else q.h4err = "not enough 4h history"; }
+      else q.h4err = h.error;
+    }
+
+    // Combine timeframes + finalize
+    const out = rows.map((r) => {
+      if (r.error) return r;
+      const c = combineTF(r.daily, r.h4 || null);
+      return { symbol: r.symbol, ...r.daily, h4: r.h4 || null, h4err: r.h4err || null, ...c };
+    });
+    out.sort((a, b) => {
+      if (a.error && b.error) return 0;
+      if (a.error) return 1; if (b.error) return -1;
+      return (b.combinedScore || 0) - (a.combinedScore || 0);
+    });
+    setProgress((p) => ({ ...p, current: "" }));
+    setResults(out);
+    setScreening(false);
+  }, [proxyUrl, universe]);
+
+  const stopScreen = useCallback(() => { cancelRef.current = true; }, []);
+
+  const loadFromScreen = useCallback((sym) => {
+    setSymbol(sym);
+    setIntervalId("1day");
+    setMode("single");
+    run(sym);
+  }, [run]);
+
+  // Real order flow (Polygon trades) for the current single-view symbol
+  const loadFlow = useCallback(async () => {
+    const base = proxyUrl.trim().replace(/\/+$/, "");
+    const sym = ((meta && meta.symbol) || symbol).trim().toUpperCase();
+    if (!base || !sym) return;
+    setFlow({ loading: true });
+    try {
+      const res = await fetch(`${base}/api/flow?symbol=${encodeURIComponent(sym)}`);
+      const json = await res.json();
+      if (json.error) setFlow({ err: json.error });
+      else setFlow({ data: json });
+    } catch { setFlow({ err: "Couldn't reach the proxy for order flow." }); }
+  }, [proxyUrl, meta, symbol]);
+
+  // Fill the watchlist from a whole-market scan (Polygon snapshot)
+  const pullMarket = useCallback(async () => {
+    const base = proxyUrl.trim().replace(/\/+$/, "");
+    if (!base) { setScreenErr("Enter your proxy URL first."); return; }
+    setPulling(true); setScreenErr("");
+    try {
+      const res = await fetch(`${base}/api/universe?sort=${uniSort}&limit=25&minPrice=5&minVol=1000000`);
+      const json = await res.json();
+      if (json.error) setScreenErr(json.error);
+      else if (json.tickers && json.tickers.length) setUniverse(json.tickers.map((t) => t.symbol).join(", "));
+      else setScreenErr("No tickers came back from the market scan.");
+    } catch { setScreenErr("Couldn't reach the proxy for the market scan."); }
+    setPulling(false);
+  }, [proxyUrl, uniSort]);
+
   /* derive indicators + chart rows */
   const model = useMemo(() => {
     if (!raw) return null;
@@ -355,10 +588,11 @@ function QuantTerminal() {
     const hi = Math.max(...raw.map((r) => r.high));
     const lo = Math.min(...raw.map((r) => r.low));
     const vol = annualizedVol(closes);
+    const bs = estBuySell(raw, 10);
 
     // show recent window for legibility
     const view = rows.slice(-120);
-    return { rows, view, signals, bias, score, last, chg, chgPct, hi, lo, vol };
+    return { rows, view, signals, bias, score, last, chg, chgPct, hi, lo, vol, buyPct: bs.buyPct };
   }, [raw]);
 
   const tickFmt = (dt) => (dt || "").slice(5, 10);
@@ -404,6 +638,23 @@ function QuantTerminal() {
         </div>
       </div>
 
+      {/* ---- Mode toggle ---- */}
+      <div style={{ display: "flex", gap: 4, padding: "12px 24px 0", background: C.panelAlt }}>
+        {[["single", "Analyze", Activity], ["screen", "Screener", Filter]].map(([id, label, Icon]) => (
+          <button key={id} onClick={() => setMode(id)}
+            style={{
+              display: "flex", alignItems: "center", gap: 7, border: "none",
+              borderBottom: `2px solid ${mode === id ? C.acc : "transparent"}`,
+              background: "transparent", color: mode === id ? C.text : C.dim,
+              padding: "8px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer",
+              fontFamily: "inherit",
+            }}>
+            <Icon size={15} /> {label}
+          </button>
+        ))}
+      </div>
+
+      {mode === "single" && (<>
       {/* ---- Controls ---- */}
       <div style={{ padding: "16px 24px", borderBottom: `1px solid ${C.line}`, background: C.panelAlt }}>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
@@ -484,6 +735,9 @@ function QuantTerminal() {
             <Stat label="RSI-14" value={fmt(model.last.rsi, 1)}
               color={model.last.rsi >= 70 ? C.down : model.last.rsi <= 30 ? C.up : C.text} />
             <Stat label="Ann. Vol" value={`${fmt(model.vol, 1)}%`} color={C.amber} />
+            <Stat label="Buy Vol (est)" value={`${fmt(model.buyPct, 0)}%`}
+              sub={`${fmt(100 - model.buyPct, 0)}% sell`}
+              color={model.buyPct > 55 ? C.up : model.buyPct < 45 ? C.down : C.text} />
           </div>
 
           {/* bias badge */}
@@ -493,6 +747,9 @@ function QuantTerminal() {
               Composite of {model.signals.length} signals · score {model.score >= 0 ? "+" : ""}{model.score}
             </div>
           </div>
+
+          {/* real order flow */}
+          <FlowPanel flow={flow} onLoad={loadFlow} />
 
           {/* price chart */}
           <Panel title="PRICE · CANDLES + SMA(20/50/200) + BOLLINGER(20,2)">
@@ -568,7 +825,7 @@ function QuantTerminal() {
 
           {/* signals */}
           <div style={{ marginTop: 22 }}>
-            <SectionLabel>SIGNAL BREAKDOWN</SectionLabel>
+            <SectionLabel>SIGNAL BREAKDOWN <span style={{ color: C.faint, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>· tap a card for why</span></SectionLabel>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))", gap: 10, marginTop: 12 }}>
               {model.signals.map((s, i) => <SignalCard key={i} s={s} />)}
             </div>
@@ -577,6 +834,82 @@ function QuantTerminal() {
           <div style={{ marginTop: 22, fontSize: 11, color: C.faint, lineHeight: 1.6, borderTop: `1px solid ${C.line}`, paddingTop: 14 }}>
             Indicators are descriptive, computed from delayed/EOD data depending on your plan. This is an
             analysis tool, not investment advice — signals are mechanical rules, not recommendations.
+          </div>
+        </div>
+      )}
+      </>)}
+
+      {mode === "screen" && (
+        <div style={{ padding: 24 }}>
+          <div style={{ background: C.panelAlt, border: `1px solid ${C.line}`, borderRadius: 14, padding: 16, marginBottom: 18 }}>
+            <SectionLabel>WATCHLIST</SectionLabel>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8, marginBottom: 4, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 11, color: C.dim }}>Fill from market scan:</span>
+              <div style={{ display: "flex", gap: 4, background: C.bg, padding: 4, borderRadius: 9, border: `1px solid ${C.line}` }}>
+                {[["losers", "Top Losers"], ["gainers", "Top Gainers"], ["active", "Most Active"]].map(([id, label]) => (
+                  <button key={id} onClick={() => setUniSort(id)}
+                    style={{ border: "1px solid transparent", background: uniSort === id ? C.acc : "transparent", color: uniSort === id ? "#0a0d0c" : C.dim, padding: "5px 10px", borderRadius: 6, fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <button onClick={pullMarket} disabled={pulling}
+                style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", color: C.acc, border: `1px solid ${C.acc}55`, padding: "6px 12px", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: pulling ? "wait" : "pointer", fontFamily: "inherit" }}>
+                {pulling ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Activity size={14} />}
+                {pulling ? "Pulling…" : "Pull 25"}
+              </button>
+            </div>
+            <textarea
+              value={universe}
+              onChange={(e) => setUniverse(e.target.value)}
+              spellCheck={false}
+              rows={2}
+              style={{
+                width: "100%", marginTop: 8, background: "#0a0d0c", border: `1px solid ${C.line}`,
+                borderRadius: 10, color: C.text, padding: "10px 12px", fontSize: 13, letterSpacing: 0.5,
+                fontFamily: "'JetBrains Mono', monospace", boxSizing: "border-box", resize: "vertical",
+              }}
+            />
+            <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 12, flexWrap: "wrap" }}>
+              {!screening ? (
+                <button className="qt-btn" onClick={runScreen}
+                  style={{ display: "flex", alignItems: "center", gap: 8, background: C.acc, color: "#0a0d0c", border: "none", padding: "0 20px", height: 40, borderRadius: 10, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                  <Filter size={16} /> Run Screen
+                </button>
+              ) : (
+                <button onClick={stopScreen}
+                  style={{ display: "flex", alignItems: "center", gap: 8, background: C.down, color: "#0a0d0c", border: "none", padding: "0 20px", height: 40, borderRadius: 10, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+                  <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> Stop
+                </button>
+              )}
+              {screening && (
+                <span style={{ fontSize: 12.5, color: C.dim }}>
+                  {progress.phase || "Scanning"} {Math.min(progress.done + 1, progress.total)}/{progress.total}
+                  {progress.current ? ` · ${progress.current}` : ""} — throttled to ~5/min.
+                </span>
+              )}
+            </div>
+            {screenErr && (
+              <div style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center", color: C.down, fontSize: 12.5 }}>
+                <AlertCircle size={15} /> {screenErr}
+              </div>
+            )}
+          </div>
+
+          {results && <ScreenerTable results={results} onPick={loadFromScreen} />}
+
+          {!results && !screening && (
+            <div style={{ padding: "40px 0", textAlign: "center", color: C.dim, fontSize: 13, lineHeight: 1.6 }}>
+              Scans each ticker's daily chart for a <span style={{ color: C.acc }}>pullback-into-support</span> setup
+              (oversold RSI + negative MACD in the Fibonacci golden pocket near the 50-EMA), then confirms timing on the
+              <span style={{ color: C.acc }}> 4-hour</span> (RSI turning up, MACD histogram rising, buy-volume tilt).
+              <span style={{ color: C.text }}> ALIGNED</span> = both agree; <span style={{ color: C.text }}>WAIT</span> = daily ready, 4h not yet.
+            </div>
+          )}
+
+          <div style={{ marginTop: 22, fontSize: 11, color: C.faint, lineHeight: 1.6, borderTop: `1px solid ${C.line}`, paddingTop: 14 }}>
+            Use <b>Pull 25</b> to seed the watchlist from a live whole-market scan (top losers suit a reversal hunt), edit freely, then Run Screen.
+            Each name gets a daily scan plus a 4-hour confirmation when it shows a daily setup. Scores are mechanical multi-timeframe pattern flags, <b>not</b> predictions or investment advice.
           </div>
         </div>
       )}
@@ -618,6 +951,117 @@ function StatusPill({ health, onClick }) {
       {s.label}
       <style>{`@keyframes qtpulse{0%,100%{opacity:1}50%{opacity:.3}}`}</style>
     </button>
+  );
+}
+
+function FlowPanel({ flow, onLoad }) {
+  const btn = { background: C.text, color: "#0a0d0c", border: "none", padding: "7px 14px", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" };
+  const d = flow && flow.data;
+  const fmtT = (ms) => ms ? new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
+  const buy = d ? Math.max(0, Math.min(100, d.buyPct)) : 0;
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14, padding: 14, marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+        <SectionLabel>REAL ORDER FLOW · TICK-RULE (POLYGON TRADES)</SectionLabel>
+        {!flow && <button onClick={onLoad} style={btn}>Load buy/sell flow</button>}
+        {flow && flow.loading && (
+          <span style={{ fontSize: 12, color: C.dim, display: "flex", gap: 6, alignItems: "center" }}>
+            <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> classifying trades…
+          </span>
+        )}
+        {flow && flow.err && <button onClick={onLoad} style={btn}>retry</button>}
+      </div>
+      {flow && flow.err && (
+        <div style={{ marginTop: 10, color: C.down, fontSize: 12.5, display: "flex", gap: 8, alignItems: "center" }}>
+          <AlertCircle size={15} /> {flow.err}
+        </div>
+      )}
+      {d && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ display: "flex", height: 16, borderRadius: 8, overflow: "hidden", border: `1px solid ${C.line}` }}>
+            <div style={{ width: `${buy}%`, background: C.up }} />
+            <div style={{ width: `${100 - buy}%`, background: C.down }} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 12.5 }}>
+            <span style={{ color: C.up, fontWeight: 700 }}>Buy {fmt(d.buyPct, 1)}%</span>
+            <span style={{ color: C.down, fontWeight: 700 }}>Sell {fmt(100 - d.buyPct, 1)}%</span>
+          </div>
+          <div style={{ marginTop: 8, fontSize: 11, color: C.dim, lineHeight: 1.5 }}>
+            {d.trades.toLocaleString()} trades · buy {Math.round(d.buyVol).toLocaleString()} sh vs sell {Math.round(d.sellVol).toLocaleString()} sh<br />
+            window {fmtT(d.fromMs)} → {fmtT(d.toMs)} · aggressor side via tick rule (real trades, classification is an estimate)
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScreenerTable({ results, onPick }) {
+  const okRows = results.filter((r) => !r.error);
+  const errRows = results.filter((r) => r.error);
+  const badge = (v) => {
+    const map = { ALIGNED: C.acc, WATCH: C.amber, WAIT: C.blue, "—": C.faint };
+    const c = map[v] || C.faint;
+    const filled = v === "ALIGNED" || v === "WATCH";
+    return (
+      <span style={{
+        color: v === "—" ? C.faint : (filled ? "#0a0d0c" : c),
+        background: v === "—" ? "transparent" : (filled ? c : `${c}22`),
+        border: `1px solid ${c}`, padding: "2px 8px", borderRadius: 999, fontSize: 10, fontWeight: 800, letterSpacing: 0.5,
+      }}>{v}</span>
+    );
+  };
+  const th = { textAlign: "left", padding: "8px 10px", fontSize: 10, color: C.dim, textTransform: "uppercase", letterSpacing: 1, fontWeight: 700, borderBottom: `1px solid ${C.line}`, whiteSpace: "nowrap" };
+  const thR = { ...th, textAlign: "right" };
+  const td = { padding: "10px", fontSize: 12.5, borderBottom: `1px solid ${C.line}`, whiteSpace: "nowrap" };
+  return (
+    <div className="qt-scroll" style={{ overflowX: "auto", border: `1px solid ${C.line}`, borderRadius: 12 }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1040 }}>
+        <thead><tr>
+          <th style={th}>Ticker</th><th style={th}>Setup</th><th style={th}>4H (n/3)</th><th style={thR}>Score</th>
+          <th style={thR}>Price</th><th style={thR}>RSI</th><th style={thR}>MACD h</th>
+          <th style={th}>Fib zone</th><th style={th}>Next Fib</th><th style={thR}>vs EMA50</th>
+          <th style={thR}>Rel Vol</th><th style={thR}>Buy% (est)</th>
+        </tr></thead>
+        <tbody>
+          {okRows.map((r) => {
+            const emaPct = r.ema50 ? ((r.price - r.ema50) / r.ema50) * 100 : null;
+            const hot = r.verdict !== "—";
+            return (
+              <tr key={r.symbol} onClick={() => onPick(r.symbol)} title="Open in Analyze"
+                style={{ cursor: "pointer", background: hot ? `${C.acc}0c` : "transparent" }}>
+                <td style={{ ...td, fontWeight: 700, color: hot ? C.acc : C.text }}>{r.symbol}</td>
+                <td style={td}>{badge(r.verdict)}</td>
+                <td style={td}>
+                  {r.h4Confirm == null
+                    ? (r.h4err
+                        ? <span style={{ color: C.down }} title={`4h fetch failed: ${r.h4err}`}>err</span>
+                        : <span style={{ color: C.faint }} title="Skipped — no daily setup">—</span>)
+                    : <span title={`4h — RSI ${r.h4.rsiTurningUp ? "up" : "down"}, MACD ${r.h4.macdRising ? "rising" : "falling"}, buy ${fmt(r.h4.buyPct, 0)}%`}
+                        style={{ color: r.h4Confirm >= 2 ? C.acc : r.h4Confirm === 1 ? C.amber : C.dim }}>
+                        {r.h4Confirm}/3 {r.h4.rsiTurningUp ? "R↑" : "R↓"} {r.h4.macdRising ? "M↑" : "M↓"}
+                      </span>}
+                </td>
+                <td style={{ ...td, textAlign: "right", fontWeight: 700 }}>{r.combinedScore}</td>
+                <td style={{ ...td, textAlign: "right" }}>{fmt(r.price)}</td>
+                <td style={{ ...td, textAlign: "right", color: r.rsi < 30 ? C.up : r.rsi < 40 ? C.amber : r.rsi > 70 ? C.down : C.text }}>{fmt(r.rsi, 1)}</td>
+                <td style={{ ...td, textAlign: "right", color: r.macdHist >= 0 ? C.up : C.down }}>{fmt(r.macdHist, 3)}</td>
+                <td style={{ ...td, color: r.atFib ? C.acc : C.dim }}>{r.fibZone}</td>
+                <td style={{ ...td, color: Math.abs(r.fibDistPct) < 1 ? C.acc : C.dim }}>
+                  {r.fibNearLabel} <span style={{ color: C.faint }}>({r.fibDistPct >= 0 ? "+" : ""}{fmt(r.fibDistPct, 1)}%)</span>
+                </td>
+                <td style={{ ...td, textAlign: "right", color: emaPct >= 0 ? C.up : C.down }}>{emaPct == null ? "—" : `${emaPct >= 0 ? "+" : ""}${fmt(emaPct, 1)}%`}</td>
+                <td style={{ ...td, textAlign: "right", color: r.volConfirm ? C.acc : C.dim }}>{fmt(r.relVol, 2)}x</td>
+                <td style={{ ...td, textAlign: "right", color: r.buyPct > 55 ? C.up : r.buyPct < 45 ? C.down : C.text }}>{fmt(r.buyPct, 0)}%</td>
+              </tr>
+            );
+          })}
+          {errRows.map((r) => (
+            <tr key={r.symbol}><td style={{ ...td, color: C.faint }}>{r.symbol}</td><td style={{ ...td, color: C.faint }} colSpan={11}>{r.error}</td></tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -672,16 +1116,38 @@ function Legend2({ items }) {
   );
 }
 
+const SIGNAL_WHY = {
+  "MA Trend (50/200)": "Compares the 50-period average to the 200-period average — the medium trend vs the long trend. 50 above 200 (a \"golden cross\" regime) means recent prices are stronger than the long-run average, read as an uptrend backdrop (bullish). 50 below 200 (\"death cross\") is the reverse. It's a slow, regime-level read, not an entry trigger.",
+  "Price vs SMA-50": "Where the latest close sits versus its 50-period average. Above the average = price is leading its recent mean, i.e. buyers in control over the medium term (bullish). Below = sellers in control (bearish). A common dividing line for medium-term momentum.",
+  "RSI-14": "RSI scores the speed of recent gains vs losses from 0–100. Above 70 = \"overbought\": the up-move may be stretched, so it's cautionary for chasing (bearish tilt). Below 30 = \"oversold\": selling may be exhausted, often where bounces start (bullish tilt). 30–70 is balanced momentum.",
+  "MACD (12/26/9)": "MACD is the gap between a fast (12) and slow (26) EMA, smoothed by a 9-period signal line. MACD above its signal / a positive histogram = upward momentum building (bullish). Below = downward momentum (bearish). A fresh crossover flags a possible momentum shift.",
+  "Bollinger (20,2)": "Bands sit 2 standard deviations above/below the 20-period average. A close above the upper band means price is unusually stretched high — mean-reversion risk, cautionary (bearish for chasing). Below the lower band means unusually depressed — potential snap-back (bullish). Inside the bands is a normal range.",
+};
+
 function SignalCard({ s }) {
+  const [open, setOpen] = useState(false);
   const map = { bull: C.up, bear: C.down, neutral: C.dim };
   const c = map[s.verdict];
+  const why = SIGNAL_WHY[s.name];
   return (
-    <div style={{ background: C.panelAlt, border: `1px solid ${C.line}`, borderLeft: `3px solid ${c}`, borderRadius: 10, padding: "11px 13px" }}>
+    <div onClick={() => why && setOpen((o) => !o)}
+      style={{ background: C.panelAlt, border: `1px solid ${open ? c : C.line}`, borderLeft: `3px solid ${c}`, borderRadius: 10, padding: "11px 13px", cursor: why ? "pointer" : "default", transition: "border-color .15s" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 12.5, fontWeight: 700 }}>{s.name}</span>
         <span style={{ fontSize: 10, fontWeight: 700, color: c, textTransform: "uppercase", letterSpacing: 1 }}>{s.verdict}</span>
       </div>
       <div style={{ fontSize: 11.5, color: C.dim, marginTop: 4, lineHeight: 1.4 }}>{s.detail}</div>
+      {why && (
+        <div style={{ fontSize: 10.5, color: C.faint, marginTop: 6, display: "flex", alignItems: "center", gap: 5 }}>
+          <span style={{ display: "inline-block", transform: open ? "rotate(90deg)" : "none", transition: "transform .15s" }}>▸</span>
+          {open ? "why this reads that way" : "why?"}
+        </div>
+      )}
+      {open && why && (
+        <div style={{ fontSize: 11.5, color: C.text, marginTop: 8, lineHeight: 1.55, borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
+          {why}
+        </div>
+      )}
     </div>
   );
 }

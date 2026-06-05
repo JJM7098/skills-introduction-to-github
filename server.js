@@ -82,6 +82,59 @@ async function fromPolygon(symbol, ivKey) {
   })); // sort=asc -> already oldest-first
 }
 
+// ---- Polygon: real buy/sell flow via tick-rule on recent trades ----
+async function polygonFlow(symbol) {
+  if (PROVIDER !== "polygon") throw { status: 400, msg: "Order flow requires the Polygon provider." };
+  if (!POLY_KEY) throw { status: 500, msg: "POLYGON_API_KEY is not set on the server." };
+  const url = `https://api.polygon.io/v3/trades/${encodeURIComponent(symbol)}?order=desc&sort=timestamp&limit=50000&apiKey=${POLY_KEY}`;
+  const r = await fetch(url);
+  const d = await r.json();
+  if (!r.ok) throw { status: r.status, msg: d.error || d.message || `Polygon HTTP ${r.status} (trades may need a tier that includes tick data)` };
+  if (d.status === "ERROR" || d.error) throw { status: 502, msg: d.error || d.message || "Polygon error." };
+  const trades = (d.results || [])
+    .map((t) => ({ p: t.price, s: t.size, t: t.sip_timestamp || t.participant_timestamp || 0 }))
+    .filter((x) => x.p != null && x.s != null);
+  if (!trades.length) throw { status: 404, msg: "No recent trades (market closed, or symbol has no trades)." };
+  trades.reverse(); // we pulled newest-first; classify in chronological order
+
+  // Tick rule: uptick = buy, downtick = sell, equal = carry last direction.
+  let buy = 0, sell = 0, lastDir = 1, prev = null;
+  for (const tr of trades) {
+    let dir = prev == null ? lastDir : (tr.p > prev ? 1 : tr.p < prev ? -1 : lastDir);
+    if (dir > 0) buy += tr.s; else sell += tr.s;
+    lastDir = dir; prev = tr.p;
+  }
+  const tot = buy + sell;
+  return {
+    symbol, method: "tick-rule",
+    buyVol: buy, sellVol: sell, buyPct: tot ? (buy / tot) * 100 : 50,
+    trades: trades.length,
+    fromMs: Math.round(trades[0].t / 1e6),
+    toMs: Math.round(trades[trades.length - 1].t / 1e6),
+  };
+}
+
+// ---- Polygon: whole-market snapshot, filtered + sorted ----
+async function polygonUniverse(sort, limit, minPrice, minVol) {
+  if (PROVIDER !== "polygon") throw { status: 400, msg: "Market scan requires the Polygon provider." };
+  if (!POLY_KEY) throw { status: 500, msg: "POLYGON_API_KEY is not set on the server." };
+  const url = `https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey=${POLY_KEY}`;
+  const r = await fetch(url);
+  const d = await r.json();
+  if (!r.ok) throw { status: r.status, msg: d.error || d.message || `Polygon HTTP ${r.status}` };
+  if (d.status === "ERROR" || d.error) throw { status: 502, msg: d.error || d.message || "Polygon error." };
+  let rows = (d.tickers || []).map((t) => ({
+    symbol: t.ticker,
+    price: (t.lastTrade && t.lastTrade.p) || (t.day && t.day.c) || (t.prevDay && t.prevDay.c) || 0,
+    changePct: t.todaysChangePerc != null ? t.todaysChangePerc : 0,
+    volume: (t.day && t.day.v) || 0,
+  })).filter((x) => x.price >= minPrice && x.volume >= minVol && /^[A-Z]+$/.test(x.symbol));
+  if (sort === "losers") rows.sort((a, b) => a.changePct - b.changePct);
+  else if (sort === "gainers") rows.sort((a, b) => b.changePct - a.changePct);
+  else rows.sort((a, b) => b.volume - a.volume);
+  return { sort, total: rows.length, tickers: rows.slice(0, limit) };
+}
+
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://${req.headers.host}`);
 
@@ -100,6 +153,25 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (u.pathname === "/health") return send(res, 200, { ok: true, provider: PROVIDER });
+
+  // ---- Real order flow: tick-rule buy/sell from recent trades (Polygon) ----
+  if (u.pathname === "/api/flow") {
+    const symbol = (u.searchParams.get("symbol") || "").trim().toUpperCase();
+    if (!symbol) return send(res, 400, { error: "Missing ?symbol" });
+    try { return send(res, 200, await polygonFlow(symbol)); }
+    catch (e) { return send(res, e.status || 502, { error: e.msg || "flow request failed" }); }
+  }
+
+  // ---- Whole-market scan: filtered/sorted snapshot of all US tickers (Polygon) ----
+  if (u.pathname === "/api/universe") {
+    const sort = u.searchParams.get("sort") || "active";
+    const limit = Math.min(100, +(u.searchParams.get("limit") || 25));
+    const minPrice = +(u.searchParams.get("minPrice") || 5);
+    const minVol = +(u.searchParams.get("minVol") || 1000000);
+    try { return send(res, 200, await polygonUniverse(sort, limit, minPrice, minVol)); }
+    catch (e) { return send(res, e.status || 502, { error: e.msg || "universe request failed" }); }
+  }
+
   if (u.pathname !== "/api/timeseries") return send(res, 404, { error: "Not found." });
 
   const symbol = (u.searchParams.get("symbol") || "").trim().toUpperCase();
