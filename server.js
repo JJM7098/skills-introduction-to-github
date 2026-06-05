@@ -82,35 +82,71 @@ async function fromPolygon(symbol, ivKey) {
   })); // sort=asc -> already oldest-first
 }
 
-// ---- Polygon: real buy/sell flow via tick-rule on recent trades ----
+// Small JSON GET with Polygon error handling
+async function pgGet(url) {
+  const r = await fetch(url);
+  const d = await r.json();
+  if (!r.ok) throw { status: r.status, msg: d.error || d.message || `Polygon HTTP ${r.status}` };
+  if (d.status === "ERROR" || d.error) throw { status: 502, msg: d.error || d.message || "Polygon error." };
+  return d;
+}
+
+// ---- Polygon: real buy/sell flow via Lee-Ready (quote-matched) classification ----
 async function polygonFlow(symbol) {
   if (PROVIDER !== "polygon") throw { status: 400, msg: "Order flow requires the Polygon provider." };
   if (!POLY_KEY) throw { status: 500, msg: "POLYGON_API_KEY is not set on the server." };
-  const url = `https://api.polygon.io/v3/trades/${encodeURIComponent(symbol)}?order=desc&sort=timestamp&limit=50000&apiKey=${POLY_KEY}`;
-  const r = await fetch(url);
-  const d = await r.json();
-  if (!r.ok) throw { status: r.status, msg: d.error || d.message || `Polygon HTTP ${r.status} (trades may need a tier that includes tick data)` };
-  if (d.status === "ERROR" || d.error) throw { status: 502, msg: d.error || d.message || "Polygon error." };
-  const trades = (d.results || [])
+  const KEY = `apiKey=${POLY_KEY}`;
+
+  // 1) Most recent trades define the analysis window.
+  const td = await pgGet(`https://api.polygon.io/v3/trades/${encodeURIComponent(symbol)}?order=desc&sort=timestamp&limit=50000&${KEY}`);
+  const trades = (td.results || [])
     .map((t) => ({ p: t.price, s: t.size, t: t.sip_timestamp || t.participant_timestamp || 0 }))
     .filter((x) => x.p != null && x.s != null);
   if (!trades.length) throw { status: 404, msg: "No recent trades (market closed, or symbol has no trades)." };
-  trades.reverse(); // we pulled newest-first; classify in chronological order
+  trades.reverse(); // chronological
+  const startT = trades[0].t, endT = trades[trades.length - 1].t;
 
-  // Tick rule: uptick = buy, downtick = sell, equal = carry last direction.
-  let buy = 0, sell = 0, lastDir = 1, prev = null;
+  // 2) NBBO quotes spanning the same window (paginated, capped).
+  const BUFFER = 5_000_000_000; // 5s in ns, so the first trade has a prior quote
+  const MAX_PAGES = 4;          // up to ~200k quotes
+  const quotes = [];
+  let qurl = `https://api.polygon.io/v3/quotes/${encodeURIComponent(symbol)}?order=asc&sort=timestamp&limit=50000&timestamp.gte=${startT - BUFFER}&timestamp.lte=${endT}&${KEY}`;
+  for (let page = 0; qurl && page < MAX_PAGES; page++) {
+    const qd = await pgGet(qurl);
+    for (const q of (qd.results || [])) {
+      const b = q.bid_price, a = q.ask_price, t = q.sip_timestamp || q.participant_timestamp || 0;
+      if (b != null && a != null) quotes.push({ b, a, t });
+    }
+    qurl = qd.next_url ? `${qd.next_url}&${KEY}` : null;
+  }
+
+  // 3) Lee-Ready: quote rule vs midpoint; tick test only as a tie-break at the mid.
+  const STALE = 2_000_000_000; // 2s — beyond this the "prevailing" quote is too old to trust
+  let buy = 0, sell = 0, qClassified = 0, tickFallback = 0;
+  let qi = 0, curB = null, curA = null, curT = 0, lastDir = 1, prevP = null;
   for (const tr of trades) {
-    let dir = prev == null ? lastDir : (tr.p > prev ? 1 : tr.p < prev ? -1 : lastDir);
+    while (qi < quotes.length && quotes[qi].t <= tr.t) { curB = quotes[qi].b; curA = quotes[qi].a; curT = quotes[qi].t; qi++; }
+    const fresh = curA != null && curB != null && curA > curB && (tr.t - curT) <= STALE;
+    let dir;
+    if (fresh) {
+      const mid = (curB + curA) / 2;
+      dir = tr.p > mid ? 1 : tr.p < mid ? -1 : (prevP == null ? lastDir : (tr.p > prevP ? 1 : tr.p < prevP ? -1 : lastDir));
+      qClassified++;
+    } else {
+      dir = prevP == null ? lastDir : (tr.p > prevP ? 1 : tr.p < prevP ? -1 : lastDir); // tick fallback
+      tickFallback++;
+    }
     if (dir > 0) buy += tr.s; else sell += tr.s;
-    lastDir = dir; prev = tr.p;
+    lastDir = dir; prevP = tr.p;
   }
   const tot = buy + sell;
   return {
-    symbol, method: "tick-rule",
+    symbol, method: "lee-ready",
     buyVol: buy, sellVol: sell, buyPct: tot ? (buy / tot) * 100 : 50,
-    trades: trades.length,
-    fromMs: Math.round(trades[0].t / 1e6),
-    toMs: Math.round(trades[trades.length - 1].t / 1e6),
+    trades: trades.length, quotes: quotes.length,
+    quoteClassifiedPct: trades.length ? (qClassified / trades.length) * 100 : 0,
+    tickFallback,
+    fromMs: Math.round(startT / 1e6), toMs: Math.round(endT / 1e6),
   };
 }
 
