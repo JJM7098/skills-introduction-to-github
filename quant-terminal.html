@@ -962,11 +962,11 @@ function FlowPanel({ flow, onLoad }) {
   return (
     <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 14, padding: 14, marginBottom: 16 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-        <SectionLabel>REAL ORDER FLOW · QUOTE-MATCHED (LEE-READY)</SectionLabel>
+        <SectionLabel>REAL ORDER FLOW{d ? (d.method === "lee-ready" ? " · QUOTE-MATCHED" : " · TICK-RULE") : ""}</SectionLabel>
         {!flow && <button onClick={onLoad} style={btn}>Load buy/sell flow</button>}
         {flow && flow.loading && (
           <span style={{ fontSize: 12, color: C.dim, display: "flex", gap: 6, alignItems: "center" }}>
-            <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> matching trades to NBBO quotes…
+            <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> classifying recent trades…
           </span>
         )}
         {flow && flow.err && <button onClick={onLoad} style={btn}>retry</button>}
@@ -987,8 +987,13 @@ function FlowPanel({ flow, onLoad }) {
             <span style={{ color: C.down, fontWeight: 700 }}>Sell {fmt(100 - d.buyPct, 1)}%</span>
           </div>
           <div style={{ marginTop: 8, fontSize: 11, color: C.dim, lineHeight: 1.5 }}>
-            {d.trades.toLocaleString()} trades matched to {(d.quotes || 0).toLocaleString()} NBBO quotes · buy {Math.round(d.buyVol).toLocaleString()} sh vs sell {Math.round(d.sellVol).toLocaleString()} sh<br />
-            {fmt(d.quoteClassifiedPct || 0, 0)}% quote-classified{d.tickFallback ? ` · ${d.tickFallback.toLocaleString()} fell back to tick rule` : ""} · window {fmtT(d.fromMs)} → {fmtT(d.toMs)}
+            {d.method === "lee-ready" ? (
+              <>{d.trades.toLocaleString()} trades matched to {(d.quotes || 0).toLocaleString()} NBBO quotes · {fmt(d.quoteClassifiedPct || 0, 0)}% quote-classified{d.tickFallback ? ` · ${d.tickFallback.toLocaleString()} via tick rule` : ""}</>
+            ) : (
+              <>{d.trades.toLocaleString()} trades · classified by tick rule (upgrade your Polygon tier to NBBO quotes for quote-matched precision)</>
+            )}
+            <br />
+            buy {Math.round(d.buyVol).toLocaleString()} sh vs sell {Math.round(d.sellVol).toLocaleString()} sh · window {fmtT(d.fromMs)} → {fmtT(d.toMs)}
           </div>
         </div>
       )}
