@@ -91,6 +91,38 @@ async function pgGet(url) {
   return d;
 }
 
+// Heuristic participant tag from a single trade's price + size. This is an
+// ESTIMATE inferred from trade fingerprints — public feeds carry no counterparty id.
+function classifyParticipant(price, size) {
+  const cents = price * 100;
+  const subPenny = Math.abs(cents - Math.round(cents)) > 1e-6; // wholesaler price-improvement tell
+  if (size >= 10000) return "inst";   // block
+  if (subPenny) return "retail";      // sub-penny internalized print
+  if (size < 100) return "retail";    // odd lot
+  if (size >= 5000) return "inst";    // large round lot
+  return "mid";                       // 100–4999 round lots: genuinely ambiguous
+}
+
+// Accumulate buy/sell volume split by participant estimate.
+function newPart() { return { instBuy: 0, instSell: 0, retBuy: 0, retSell: 0, midBuy: 0, midSell: 0 }; }
+function addPart(P, price, size, dir) {
+  const cls = classifyParticipant(price, size);
+  const b = dir > 0;
+  if (cls === "inst") { if (b) P.instBuy += size; else P.instSell += size; }
+  else if (cls === "retail") { if (b) P.retBuy += size; else P.retSell += size; }
+  else { if (b) P.midBuy += size; else P.midSell += size; }
+}
+function finishPart(P, tot) {
+  const instVol = P.instBuy + P.instSell, retVol = P.retBuy + P.retSell, midVol = P.midBuy + P.midSell;
+  return {
+    instPct: tot ? (instVol / tot) * 100 : 0,
+    retailPct: tot ? (retVol / tot) * 100 : 0,
+    midPct: tot ? (midVol / tot) * 100 : 0,
+    instBuyPct: instVol ? (P.instBuy / instVol) * 100 : 50,
+    retailBuyPct: retVol ? (P.retBuy / retVol) * 100 : 50,
+  };
+}
+
 // ---- Polygon: real buy/sell flow. Uses quote-matched (Lee-Ready) when the
 //      tier includes NBBO quotes; auto-falls back to the tick rule otherwise. ----
 async function polygonFlow(symbol) {
@@ -133,6 +165,7 @@ async function polygonFlow(symbol) {
     const STALE = 2_000_000_000;
     let buy = 0, sell = 0, qClassified = 0, tickFallback = 0;
     let qi = 0, curB = null, curA = null, curT = 0, lastDir = 1, prevP = null;
+    const P = newPart();
     for (const tr of trades) {
       while (qi < quotes.length && quotes[qi].t <= tr.t) { curB = quotes[qi].b; curA = quotes[qi].a; curT = quotes[qi].t; qi++; }
       const fresh = curA != null && curB != null && curA > curB && (tr.t - curT) <= STALE;
@@ -146,6 +179,7 @@ async function polygonFlow(symbol) {
         tickFallback++;
       }
       if (dir > 0) buy += tr.s; else sell += tr.s;
+      addPart(P, tr.p, tr.s, dir);
       lastDir = dir; prevP = tr.p;
     }
     const tot = buy + sell;
@@ -155,14 +189,17 @@ async function polygonFlow(symbol) {
       trades: trades.length, quotes: quotes.length,
       quoteClassifiedPct: trades.length ? (qClassified / trades.length) * 100 : 0,
       tickFallback, fromMs: Math.round(startT / 1e6), toMs: Math.round(endT / 1e6),
+      participant: finishPart(P, tot),
     };
   }
 
   // 3b) Tick rule (trades only) — works without the quotes feed
   let buy = 0, sell = 0, lastDir = 1, prev = null;
+  const P = newPart();
   for (const tr of trades) {
     const dir = prev == null ? lastDir : (tr.p > prev ? 1 : tr.p < prev ? -1 : lastDir);
     if (dir > 0) buy += tr.s; else sell += tr.s;
+    addPart(P, tr.p, tr.s, dir);
     lastDir = dir; prev = tr.p;
   }
   const tot = buy + sell;
@@ -170,6 +207,7 @@ async function polygonFlow(symbol) {
     symbol, method: "tick-rule",
     buyVol: buy, sellVol: sell, buyPct: tot ? (buy / tot) * 100 : 50,
     trades: trades.length, fromMs: Math.round(startT / 1e6), toMs: Math.round(endT / 1e6),
+    participant: finishPart(P, tot),
   };
 }
 

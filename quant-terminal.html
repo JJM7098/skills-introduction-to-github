@@ -995,6 +995,43 @@ function FlowPanel({ flow, onLoad }) {
             <br />
             buy {Math.round(d.buyVol).toLocaleString()} sh vs sell {Math.round(d.sellVol).toLocaleString()} sh · window {fmtT(d.fromMs)} → {fmtT(d.toMs)}
           </div>
+          {d.participant && (() => {
+            const p = d.participant;
+            const inst = Math.max(0, Math.min(100, p.instPct));
+            const ret = Math.max(0, Math.min(100, p.retailPct));
+            const mid = Math.max(0, 100 - inst - ret);
+            const leanColor = (pct) => pct > 55 ? C.up : pct < 45 ? C.down : C.text;
+            const chip = (label, color, pct) => (
+              <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: color, display: "inline-block" }} />
+                {label} {fmt(pct, 0)}%
+              </span>
+            );
+            return (
+              <div style={{ marginTop: 14, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
+                <div style={{ fontSize: 10.5, color: C.dim, letterSpacing: 1, textTransform: "uppercase", fontWeight: 700, marginBottom: 7 }}>
+                  Participant mix (est)
+                </div>
+                <div style={{ display: "flex", height: 14, borderRadius: 7, overflow: "hidden", border: `1px solid ${C.line}` }}>
+                  <div style={{ width: `${inst}%`, background: C.blue }} title={`Institutional ~${fmt(inst, 0)}%`} />
+                  <div style={{ width: `${ret}%`, background: C.amber }} title={`Retail ~${fmt(ret, 0)}%`} />
+                  <div style={{ width: `${mid}%`, background: C.faint }} title={`Unclassified ~${fmt(mid, 0)}%`} />
+                </div>
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 8, fontSize: 11.5, color: C.dim }}>
+                  {chip("Institutional", C.blue, inst)}
+                  {chip("Retail", C.amber, ret)}
+                  {chip("Unclassified", C.faint, mid)}
+                </div>
+                <div style={{ marginTop: 8, fontSize: 11.5, color: C.dim }}>
+                  Directional lean — institutional <span style={{ color: leanColor(p.instBuyPct), fontWeight: 700 }}>{fmt(p.instBuyPct, 0)}% buy</span>
+                  {" · "}retail <span style={{ color: leanColor(p.retailBuyPct), fontWeight: 700 }}>{fmt(p.retailBuyPct, 0)}% buy</span>
+                </div>
+                <div style={{ marginTop: 7, fontSize: 10.5, color: C.faint, lineHeight: 1.5 }}>
+                  Estimated from trade size + sub-penny prints — public feeds don't tag counterparties, so treat this as a lean, not a fact.
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>
