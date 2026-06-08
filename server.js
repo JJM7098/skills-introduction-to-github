@@ -22,6 +22,13 @@ const TD_KEY = process.env.TWELVEDATA_API_KEY || "";
 const POLY_KEY = process.env.POLYGON_API_KEY || "";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*"; // lock to your app's URL in production
 
+// --- Index membership (Dow/NDX bundled; S&P 500 fetched live with fallback) ---
+const DOW30 = "AAPL AMGN AMZN AXP BA CAT CRM CSCO CVX DIS GS HD HON IBM JNJ JPM KO MCD MMM MRK MSFT NKE NVDA PG SHW TRV UNH V VZ WMT".split(/\s+/);
+const NDX100 = "AAPL MSFT NVDA AMZN AVGO META GOOGL GOOG TSLA COST NFLX AMD PEP ADBE CSCO TMUS LIN INTC INTU QCOM TXN AMAT AMGN ISRG BKNG HON VRTX ADP ADI REGN PANW GILD MU LRCX SBUX MDLZ KLAC SNPS CDNS MELI CRWD MAR CTAS ORLY ASML ABNB CSX MRVL FTNT NXPI PCAR ROP MNST ADSK WDAY CPRT PAYX KDP ROST DXCM AEP FANG FAST EXC CCEP KHC IDXX VRSK BKR ON GEHC TTD CDW DDOG TEAM ZS ANSS WBD GFS MDB ARM SMCI DASH TTWO BIIB LULU CEG XEL CSGP ODFL DLTR WBA SIRI ILMN".split(/\s+/);
+const SP500_FALLBACK = "AAPL MSFT NVDA AMZN GOOGL GOOG META AVGO TSLA LLY JPM V WMT MA UNH XOM ORCL COST HD PG JNJ NFLX BAC ABBV CRM CVX KO MRK AMD PEP TMO LIN ADBE WFC CSCO ACN MCD ABT GE DHR IBM NOW TXN QCOM PM INTU CAT GS ISRG VZ DIS T BKNG AXP RTX SPGI AMGN PFE NEE UBER LOW HON UNP ETN BA C BLK PGR TJX SYK LMT BSX COP ADP MDT VRTX GILD MU MMC CB PLD ADI AMAT SBUX DE PANW SCHW BX KKR MO ELV CI SO REGN ZTS DUK BMY APH ICE WM CME SHW MCK TT KLAC CDNS GD EOG NKE EQIX SNPS CL ITW MSI PH AON MDLZ CMG USB PYPL APD EMR MAR FCX NXPI ORLY".split(/\s+/);
+let SP500_CACHE = null;
+
+
 // Canonical intervals the frontend asks for, mapped per provider.
 const INTERVALS = {
   "1day":  { td: "1day",  poly: { mult: 1,  span: "day" },    lookbackDays: 800 },
@@ -211,25 +218,56 @@ async function polygonFlow(symbol) {
   };
 }
 
-// ---- Polygon: whole-market snapshot, filtered + sorted ----
-async function polygonUniverse(sort, limit, minPrice, minVol) {
-  if (PROVIDER !== "polygon") throw { status: 400, msg: "Market scan requires the Polygon provider." };
+// ---- Polygon: whole-market snapshot rows (shared by universe + index scan) ----
+async function fetchSnapshotRows() {
+  if (PROVIDER !== "polygon") throw { status: 400, msg: "Market data requires the Polygon provider." };
   if (!POLY_KEY) throw { status: 500, msg: "POLYGON_API_KEY is not set on the server." };
-  const url = `https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey=${POLY_KEY}`;
-  const r = await fetch(url);
-  const d = await r.json();
-  if (!r.ok) throw { status: r.status, msg: d.error || d.message || `Polygon HTTP ${r.status}` };
-  if (d.status === "ERROR" || d.error) throw { status: 502, msg: d.error || d.message || "Polygon error." };
-  let rows = (d.tickers || []).map((t) => ({
+  const d = await pgGet(`https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?apiKey=${POLY_KEY}`);
+  return (d.tickers || []).map((t) => ({
     symbol: t.ticker,
     price: (t.lastTrade && t.lastTrade.p) || (t.day && t.day.c) || (t.prevDay && t.prevDay.c) || 0,
     changePct: t.todaysChangePerc != null ? t.todaysChangePerc : 0,
     volume: (t.day && t.day.v) || 0,
-  })).filter((x) => x.price >= minPrice && x.volume >= minVol && /^[A-Z]+$/.test(x.symbol));
+  }));
+}
+
+async function polygonUniverse(sort, limit, minPrice, minVol) {
+  let rows = (await fetchSnapshotRows()).filter((x) => x.price >= minPrice && x.volume >= minVol && /^[A-Z]+$/.test(x.symbol));
   if (sort === "losers") rows.sort((a, b) => a.changePct - b.changePct);
   else if (sort === "gainers") rows.sort((a, b) => b.changePct - a.changePct);
   else rows.sort((a, b) => b.volume - a.volume);
   return { sort, total: rows.length, tickers: rows.slice(0, limit) };
+}
+
+// Live S&P 500 constituents (public dataset) with a large-cap fallback.
+async function getSP500() {
+  if (SP500_CACHE) return SP500_CACHE;
+  try {
+    const r = await fetch("https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv");
+    if (r.ok) {
+      const txt = await r.text();
+      const syms = txt.split(/\r?\n/).slice(1)
+        .map((l) => (l.split(",")[0] || "").trim().toUpperCase())
+        .filter((s) => /^[A-Z.\-]{1,6}$/.test(s));
+      if (syms.length >= 100) { SP500_CACHE = syms; return syms; }
+    }
+  } catch { /* fall through to fallback */ }
+  SP500_CACHE = SP500_FALLBACK;
+  return SP500_FALLBACK;
+}
+
+// ---- Polygon: narrow an index to its best pullback candidates ----
+async function polygonIndexScan(index, sort, limit, minPrice, minVol) {
+  let members;
+  if (index === "dow") members = DOW30;
+  else if (index === "ndx") members = NDX100;
+  else members = await getSP500(); // sp500 default
+  const set = new Set(members.map((s) => s.toUpperCase()));
+  let rows = (await fetchSnapshotRows()).filter((x) => set.has(x.symbol) && x.price >= minPrice && x.volume >= minVol);
+  if (sort === "gainers") rows.sort((a, b) => b.changePct - a.changePct);
+  else if (sort === "active") rows.sort((a, b) => b.volume - a.volume);
+  else rows.sort((a, b) => a.changePct - b.changePct); // losers (default) — best for oversold pullbacks
+  return { index, sort, members: set.size, matched: rows.length, tickers: rows.slice(0, limit) };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -267,6 +305,17 @@ const server = http.createServer(async (req, res) => {
     const minVol = +(u.searchParams.get("minVol") || 1000000);
     try { return send(res, 200, await polygonUniverse(sort, limit, minPrice, minVol)); }
     catch (e) { return send(res, e.status || 502, { error: e.msg || "universe request failed" }); }
+  }
+
+  // ---- Index scan: best pullback candidates within S&P 500 / NDX-100 / Dow 30 ----
+  if (u.pathname === "/api/indexscan") {
+    const index = (u.searchParams.get("index") || "sp500").toLowerCase();
+    const sort = u.searchParams.get("sort") || "losers";
+    const limit = Math.min(100, +(u.searchParams.get("limit") || 40));
+    const minPrice = +(u.searchParams.get("minPrice") || 5);
+    const minVol = +(u.searchParams.get("minVol") || 1000000);
+    try { return send(res, 200, await polygonIndexScan(index, sort, limit, minPrice, minVol)); }
+    catch (e) { return send(res, e.status || 502, { error: e.msg || "index scan failed" }); }
   }
 
   if (u.pathname !== "/api/timeseries") return send(res, 404, { error: "Not found." });

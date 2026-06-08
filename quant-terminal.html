@@ -381,6 +381,7 @@ function QuantTerminal() {
   const [flow, setFlow] = useState(null);          // real order flow on Analyze view
   const [uniSort, setUniSort] = useState("losers"); // market-scan criterion
   const [pulling, setPulling] = useState(false);
+  const [idxSel, setIdxSel] = useState("sp500");    // index-scan target
 
   const checkHealth = useCallback(async () => {
     const base = proxyUrl.trim().replace(/\/+$/, "");
@@ -448,10 +449,12 @@ function QuantTerminal() {
 
   // throttled scan across the universe (one ticker at a time)
   // Two-pass scan: daily on everything, then 4-hour confirmation on daily setups.
-  const runScreen = useCallback(async () => {
+  const runScreen = useCallback(async (symsOverride) => {
     const base = proxyUrl.trim().replace(/\/+$/, "");
     if (!base) { setScreenErr("Enter your proxy URL first."); return; }
-    const syms = [...new Set(universe.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))];
+    const syms = (Array.isArray(symsOverride) && symsOverride.length)
+      ? [...new Set(symsOverride.map((s) => s.trim().toUpperCase()).filter(Boolean))]
+      : [...new Set(universe.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean))];
     if (!syms.length) { setScreenErr("Add at least one ticker to the watchlist."); return; }
 
     setScreening(true); setScreenErr(""); setResults(null);
@@ -550,6 +553,23 @@ function QuantTerminal() {
     } catch { setScreenErr("Couldn't reach the proxy for the market scan."); }
     setPulling(false);
   }, [proxyUrl, uniSort]);
+
+  // Narrow an index to its best candidates, then deep-screen them in one action
+  const scanIndex = useCallback(async () => {
+    const base = proxyUrl.trim().replace(/\/+$/, "");
+    if (!base) { setScreenErr("Enter your proxy URL first."); return; }
+    setPulling(true); setScreenErr(""); setResults(null);
+    try {
+      const res = await fetch(`${base}/api/indexscan?index=${idxSel}&sort=${uniSort}&limit=40`);
+      const json = await res.json();
+      if (json.error) { setScreenErr(json.error); setPulling(false); return; }
+      const syms = (json.tickers || []).map((t) => t.symbol);
+      if (!syms.length) { setScreenErr("No candidates matched that index scan."); setPulling(false); return; }
+      setUniverse(syms.join(", "));
+      setPulling(false);
+      runScreen(syms); // deep-screen the candidates immediately
+    } catch { setScreenErr("Couldn't reach the proxy for the index scan."); setPulling(false); }
+  }, [proxyUrl, idxSel, uniSort, runScreen]);
 
   /* derive indicators + chart rows */
   const model = useMemo(() => {
@@ -859,6 +879,22 @@ function QuantTerminal() {
                 {pulling ? "Pulling…" : "Pull 25"}
               </button>
             </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 11, color: C.dim }}>Or scan an index:</span>
+              <div style={{ display: "flex", gap: 4, background: C.bg, padding: 4, borderRadius: 9, border: `1px solid ${C.line}` }}>
+                {[["sp500", "S&P 500"], ["ndx", "NASDAQ-100"], ["dow", "Dow 30"]].map(([id, label]) => (
+                  <button key={id} onClick={() => setIdxSel(id)}
+                    style={{ border: "1px solid transparent", background: idxSel === id ? C.acc : "transparent", color: idxSel === id ? "#0a0d0c" : C.dim, padding: "5px 10px", borderRadius: 6, fontSize: 11.5, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <button onClick={scanIndex} disabled={pulling || screening}
+                style={{ display: "flex", alignItems: "center", gap: 6, background: C.acc, color: "#0a0d0c", border: "none", padding: "6px 14px", borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: (pulling || screening) ? "wait" : "pointer", fontFamily: "inherit" }}>
+                {pulling ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Filter size={14} />}
+                Scan &amp; screen
+              </button>
+            </div>
             <textarea
               value={universe}
               onChange={(e) => setUniverse(e.target.value)}
@@ -908,7 +944,7 @@ function QuantTerminal() {
           )}
 
           <div style={{ marginTop: 22, fontSize: 11, color: C.faint, lineHeight: 1.6, borderTop: `1px solid ${C.line}`, paddingTop: 14 }}>
-            Use <b>Pull 25</b> to seed the watchlist from a live whole-market scan (top losers suit a reversal hunt), edit freely, then Run Screen.
+            Use <b>Pull 25</b> for a whole-market scan, or <b>Scan &amp; screen</b> to narrow S&amp;P 500 / NASDAQ-100 / Dow 30 to their best pullback candidates (by the chosen criterion) and rank them — the top of the table is your best 25 buy setups.
             Each name gets a daily scan plus a 4-hour confirmation when it shows a daily setup. Scores are mechanical multi-timeframe pattern flags, <b>not</b> predictions or investment advice.
           </div>
         </div>
